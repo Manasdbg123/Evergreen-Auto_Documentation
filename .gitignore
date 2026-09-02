@@ -1,0 +1,10 @@
+node_modules/
+data/
+__pycache__/
+*.pyc
+.venv/
+.env
+server/generated/
+tmp/
+dist/
+.next/
