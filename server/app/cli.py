@@ -145,19 +145,28 @@ def cmd_estimate_cost(args) -> int:
           f"{capped_image_tokens(cfg):,}\n")
 
     job = estimate_job(cfg, args.minutes, has_transcript=not args.no_audio)
-    print(format_estimate(job, f"ONE {args.minutes:g}-MINUTE VIDEO"))
+    print(format_estimate(cfg, job, f"ONE {args.minutes:g}-MINUTE VIDEO"))
     steps = job[1].images
 
     text_diff = estimate_diff(cfg, steps)
-    print("\n" + format_estimate(text_diff, "DIFF (text tiers only — the normal path)"))
+    print("\n" + format_estimate(cfg, text_diff, "DIFF (text tiers only — the normal path)"))
 
     worst = estimate_diff(cfg, steps, visual=cfg.diff.max_visual_comparisons)
-    print("\n" + format_estimate(worst, "DIFF (worst case — visual fallback maxed)"))
+    print("\n" + format_estimate(cfg, worst, "DIFF (worst case — visual fallback maxed)"))
 
     per_video = sum(r.usd for r in job)
-    demo = 2 * per_video + sum(r.usd for r in text_diff)
-    print(f"\n  full demo (v1 + v2 + diff) = ${demo:.4f}")
-    print(f"  a $5 budget buys ~{int(5 / demo)} complete demos\n")
+    per_update = per_video + sum(r.usd for r in text_diff)
+    worst_update = per_video + sum(r.usd for r in worst)
+
+    # In production the previous SOP is already stored, so an update costs one
+    # video plus a diff — the old recording is never reprocessed.
+    print(f"\n  first time (create the document)   = ${per_video:.4f}")
+    print(f"  each update (1 video + diff)      = ${per_update:.4f}")
+    print(f"  each update, worst case           = ${worst_update:.4f}")
+    print(f"\n  a $5 budget buys ~{int(5 / per_update)} updates "
+          f"(~{int(5 / worst_update)} worst case)\n")
+    print("  video ingestion, frame sampling, change detection and")
+    print("  transcription are local — they cost nothing.\n")
     return 0
 
 

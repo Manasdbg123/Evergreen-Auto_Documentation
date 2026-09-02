@@ -92,7 +92,7 @@ def estimate_job(
 
     # Stage 6 — step detection / noise rejection. Every candidate is seen.
     detect_in = n_cand * img + 900 + transcript_tokens + n_cand * 20
-    detect_out = n_cand * 45
+    detect_out = n_cand * DETECT_TOKENS_PER_CANDIDATE
     out.append(StageEstimate(
         "detect_steps", cfg.models.classify, n_cand,
         detect_in, detect_out,
@@ -101,7 +101,7 @@ def estimate_job(
 
     # Stage 7 — writing the SOP. Only confirmed steps are re-sent, with vision.
     struct_in = n_steps * img + 1400 + transcript_tokens
-    struct_out = n_steps * 140
+    struct_out = n_steps * step_output_tokens(cfg) + SOP_HEADER_TOKENS
     out.append(StageEstimate(
         "structure", cfg.models.structure, n_steps,
         struct_in, struct_out,
@@ -109,6 +109,31 @@ def estimate_job(
     ))
 
     return out
+
+
+#: Per candidate: is_step, order, a one-line reason, provisional_title.
+DETECT_TOKENS_PER_CANDIDATE = 55
+
+#: sop title + summary + JSON envelope.
+SOP_HEADER_TOKENS = 120
+
+
+def step_output_tokens(cfg: Config) -> int:
+    """Output tokens for one Step object, derived from the actual schema.
+
+    Output is billed at 5x input on both models, so this is worth deriving
+    rather than guessing. Field by field, at ~1.33 tokens per word:
+
+        title            ~6 words                        8
+        instruction      capped by writing config        varies
+        ui_element       type + label + location_hint   25
+        expected_result  ~18 words                      24
+        prerequisites    ~10 words                      13
+        confidence, step_id, order, screenshot_ref,
+        meta, and JSON punctuation                      40
+    """
+    instruction = int(cfg.writing.max_instruction_words * 1.33)
+    return 8 + instruction + 25 + 24 + 13 + 40
 
 
 def estimate_diff(cfg: Config, steps: int, *, ambiguous: int | None = None,
@@ -143,19 +168,33 @@ def estimate_diff(cfg: Config, steps: int, *, ambiguous: int | None = None,
     return out
 
 
-def format_estimate(rows: list[StageEstimate], title: str) -> str:
+def format_estimate(cfg: Config, rows: list[StageEstimate], title: str) -> str:
+    """Table with input and output priced separately.
+
+    Output is 5x input per token on both models, so the split is worth
+    seeing: it is what tells you whether to tune image count or verbosity.
+    """
     lines = [
         f"  {title}",
-        f"  {'stage':<14}{'model':<28}{'imgs':>5}{'tok in':>10}{'tok out':>9}{'USD':>9}",
-        f"  {'-' * 75}",
+        f"  {'stage':<14}{'model':<26}{'imgs':>5}{'tok in':>9}{'$ in':>8}"
+        f"{'tok out':>9}{'$ out':>8}{'$ total':>9}",
+        f"  {'-' * 88}",
     ]
+    t_in = t_out = 0.0
     for r in rows:
+        p = cfg.cost.pricing.get(r.model)
+        in_usd = r.tokens_in / 1_000_000 * p.input if p else 0.0
+        out_usd = r.tokens_out / 1_000_000 * p.output if p else 0.0
+        t_in += in_usd
+        t_out += out_usd
         lines.append(
-            f"  {r.stage:<14}{r.model:<28}{r.images:>5}{r.tokens_in:>10,}"
-            f"{r.tokens_out:>9,}{r.usd:>9.4f}"
+            f"  {r.stage:<14}{r.model:<26}{r.images:>5}{r.tokens_in:>9,}{in_usd:>8.4f}"
+            f"{r.tokens_out:>9,}{out_usd:>8.4f}{r.usd:>9.4f}"
         )
-    total = sum(r.usd for r in rows)
-    lines.append(f"  {'':<47}{'TOTAL':>19}{total:>9.4f}")
+    total = t_in + t_out
+    share = f"{t_in / total * 100:.0f}% in / {t_out / total * 100:.0f}% out" if total else ""
+    lines.append(f"  {'-' * 88}")
+    lines.append(f"  {'TOTAL':<45}{'':>9}{t_in:>8.4f}{'':>9}{t_out:>8.4f}{total:>9.4f}   {share}")
     return "\n".join(lines)
 
 
