@@ -229,6 +229,10 @@ class StepDiff(BaseModel):
     new_order: int | None = None
     similarity: float | None = None
     field_changes: list[FieldChange] = []
+    #: A step can both move and change content. `status` reports the more
+    #: actionable of the two (content), so this carries the move separately
+    #: rather than letting one finding mask the other.
+    also_reordered: bool = False
     # How the verdict was reached: lexical | embedding | llm_judge | visual
     decided_by: str = "lexical"
     rationale: str = ""

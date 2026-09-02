@@ -121,6 +121,12 @@ diff:
   identical_threshold: 0.94
   # Pairs landing between these two bounds are escalated to the LLM judge.
   ambiguous_band: [0.62, 0.94]
+  # Prose fields (title, instruction, expected_result, location_hint) are
+  # rewritten from scratch on every regeneration, so wording drifts even when
+  # the workflow did not change. Above this similarity a prose difference is
+  # treated as a rewording, not a change. Identity fields (ui_element.label
+  # and .type) are always compared exactly and never get this tolerance.
+  field_rewrite_threshold: 0.72
   # Only consult screenshots when text comparison is still ambiguous.
   use_visual_fallback: true
   # Ink-mask IoU above which two screenshots show the same screen. NOT pHash:
@@ -133,7 +139,7 @@ diff:
   max_visual_comparisons: 6
   # A matched pair outside the longest-increasing-subsequence is "reordered".
   # Requires a match at least this strong to claim reorder over remove+add.
-  reorder_min_similarity: 0.78
+  reorder_min_similarity: 0.66
 
 similarity:
   # Tier 1 lexical prefilter is always on and free.

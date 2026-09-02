@@ -108,10 +108,11 @@ class DiffConfig(BaseModel):
     identical_threshold: float = 0.94
     ambiguous_band: tuple[float, float] = (0.62, 0.94)
     use_visual_fallback: bool = True
+    field_rewrite_threshold: float = 0.72
     visual_same_screen_iou: float = 0.92
     visual_different_screen_iou: float = 0.55
     max_visual_comparisons: int = 6
-    reorder_min_similarity: float = 0.78
+    reorder_min_similarity: float = 0.66
 
 
 class SimilarityConfig(BaseModel):
