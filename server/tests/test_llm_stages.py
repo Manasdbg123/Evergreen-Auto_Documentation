@@ -18,9 +18,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from app.config import load_config  # noqa: E402
+from app.config import Config, load_config  # noqa: E402
 from app.llm import offline as offline_impl  # noqa: E402
-from app.llm.client import LLMClient, ToolSpec, _rejects_sampling  # noqa: E402
+from app.llm.anthropic_provider import (_NO_SAMPLING_PREFIXES,  # noqa: E402
+                                        AnthropicProvider)
+from app.llm.client import (ToolSpec, get_provider, image_block,  # noqa: E402
+                            text_block)
+from app.llm.gemini_provider import (GeminiUsage, _to_gemini_schema,  # noqa: E402
+                                     GeminiProvider)
 from app.llm.prompts import (detect_steps_tool_schema,  # noqa: E402
                              structure_tool_schema)
 from app.models import (CandidateFrame, Confidence, Transcript,  # noqa: E402
@@ -100,7 +105,7 @@ class StubMessages:
         return self.reply
 
 
-def stub_client(cfg, payload: dict) -> tuple[LLMClient, StubMessages]:
+def stub_client(cfg, payload: dict) -> tuple[AnthropicProvider, StubMessages]:
     reply = SimpleNamespace(
         stop_reason="tool_use",
         usage=SimpleNamespace(input_tokens=100, output_tokens=50,
@@ -108,12 +113,18 @@ def stub_client(cfg, payload: dict) -> tuple[LLMClient, StubMessages]:
         content=[SimpleNamespace(type="tool_use", name="t", input=payload)],
     )
     messages = StubMessages(reply)
-    client = LLMClient.__new__(LLMClient)
+    client = AnthropicProvider.__new__(AnthropicProvider)
     client.cfg = cfg
     client.cost_log = None
     client._reason = None
     client._client = SimpleNamespace(messages=messages)
     return client, messages
+
+
+def anthropic_cfg(cfg: Config) -> Config:
+    """The same config with Anthropic active — the provider tests below assert
+    Anthropic-specific request shape regardless of which vendor is configured."""
+    return cfg.merged_with({"llm": {"provider": "anthropic"}})
 
 
 TOOL = ToolSpec(name="t", description="d", input_schema={
@@ -143,8 +154,8 @@ def test_system_prompt_is_marked_cacheable(cfg):
 def test_temperature_is_omitted_for_models_that_reject_it(cfg):
     """Sonnet 5 returns 400 on `temperature` rather than ignoring it, so
     sending the configured value would fail every structure call."""
-    assert _rejects_sampling("claude-sonnet-5")
-    assert not _rejects_sampling("claude-haiku-4-5-20251001")
+    assert "claude-sonnet-5".startswith(_NO_SAMPLING_PREFIXES)
+    assert not "claude-haiku-4-5-20251001".startswith(_NO_SAMPLING_PREFIXES)
 
     client, messages = stub_client(cfg, {"ok": True})
     client.structured(stage="s", model="claude-sonnet-5", system="sys",
@@ -158,10 +169,98 @@ def test_temperature_is_omitted_for_models_that_reject_it(cfg):
 
 
 def test_missing_key_is_reported_not_raised_at_construction(cfg, monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    client = LLMClient(cfg)
-    assert not client.available
-    assert "ANTHROPIC_API_KEY" in client.unavailable_reason
+    """Construction must never raise: the caller inspects `.available` and
+    chooses the offline path, which is what keeps the pipeline runnable."""
+    for env in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(env, raising=False)
+
+    for provider, expected in [("anthropic", "ANTHROPIC_API_KEY"),
+                               ("gemini", "GEMINI_API_KEY")]:
+        client = get_provider(cfg.merged_with({"llm": {"provider": provider}}))
+        assert not client.available
+        assert expected in client.unavailable_reason
+
+
+# --------------------------------------------------------------------------
+# Provider parity
+# --------------------------------------------------------------------------
+
+
+def test_the_active_provider_decides_the_model_ids(cfg):
+    """Switching vendor is a config line. No stage reads `llm.provider`, so
+    this resolution is the only thing that has to be right."""
+    anthropic = cfg.merged_with({"llm": {"provider": "anthropic"}})
+    gemini = cfg.merged_with({"llm": {"provider": "gemini"}})
+
+    assert anthropic.models.classify.startswith("claude-")
+    assert gemini.models.classify.startswith("gemini-")
+    assert anthropic.key_env_var == "ANTHROPIC_API_KEY"
+    assert gemini.key_env_var == "GEMINI_API_KEY"
+
+
+def test_every_model_in_play_has_a_price(cfg):
+    """An unpriced model logs $0.00 per call, so the budget cap silently stops
+    protecting anything — the failure is invisible until the bill arrives."""
+    for provider, block in cfg.llm.providers.items():
+        for role in ("classify", "structure", "judge"):
+            model = getattr(block, role)
+            assert model in cfg.cost.pricing, f"{provider}.{role} = {model}"
+
+
+def test_gemini_schema_drops_only_additional_properties(cfg):
+    """Gemini 400s on `additionalProperties`. Narrowing is safe only because
+    its constrained decoding cannot emit a key the schema does not name —
+    nothing that constrains the shape of the answer may be relaxed."""
+    original = structure_tool_schema(cfg)
+    narrowed = _to_gemini_schema(original)
+
+    for obj in walk_objects(narrowed):
+        assert "additionalProperties" not in obj
+    # Everything that shapes the answer survives.
+    old_steps = original["properties"]["steps"]["items"]
+    new_steps = narrowed["properties"]["steps"]["items"]
+    assert new_steps["required"] == old_steps["required"]
+    assert (new_steps["properties"]["ui_element"]["properties"]["type"]["enum"]
+            == old_steps["properties"]["ui_element"]["properties"]["type"]["enum"])
+
+
+def test_gemini_thought_tokens_are_billed_as_output():
+    """Measured: 434 thought tokens to produce a 14-token classification. Left
+    uncounted, cost.jsonl under-reports by more than the budget it guards."""
+    usage = GeminiUsage(SimpleNamespace(
+        prompt_token_count=1000, candidates_token_count=50,
+        thoughts_token_count=434, cached_content_token_count=0))
+
+    assert usage.input_tokens == 1000
+    assert usage.output_tokens == 484
+    assert usage.thought_tokens == 434
+
+
+def test_image_pricing_is_provider_specific(cfg):
+    """The two vendors differ by ~5x on the same image, and images are ~88% of
+    this pipeline's spend — one shared formula would misprice a run by more
+    than the whole budget."""
+    from app.llm.cost import capped_image_tokens
+
+    anthropic = capped_image_tokens(cfg.merged_with({"llm": {"provider": "anthropic"}}))
+    gemini = capped_image_tokens(cfg.merged_with({"llm": {"provider": "gemini"}}))
+
+    assert anthropic > 1500          # 1568x882 / 750
+    assert gemini < 400              # flat per-tile, measured at 259
+    assert AnthropicProvider.image_tokens(cfg, 1280, 720) == 1229
+
+
+def test_content_blocks_are_vendor_neutral(tmp_path):
+    """Stages build these; each provider encodes them. An image stays a path
+    so it is never base64-encoded for a vendor that wants raw bytes."""
+    png = tmp_path / "shot.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    assert text_block("hi").kind == "text"
+    block = image_block(png)
+    assert block.kind == "image"
+    assert block.path == png
+    assert block.media_type == "image/png"
 
 
 # --------------------------------------------------------------------------

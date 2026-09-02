@@ -14,8 +14,10 @@ imageio-ffmpeg          # static ffmpeg binary; no sudo required
 # Stage 2 — transcription (local CPU, no API)
 faster-whisper
 
-# Stages 5-8 — Anthropic only
+# Stages 6-7 — the model vendors. Only the one named by llm.provider is used
+# at runtime; both are listed so switching needs no reinstall.
 anthropic
+google-genai
 
 # Diff tier 2 — local embeddings, offline, no API key
 sentence-transformers

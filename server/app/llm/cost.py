@@ -28,13 +28,21 @@ def image_tokens(width: int, height: int) -> int:
 
 
 def capped_image_tokens(cfg: Config, aspect: float = 16 / 9) -> int:
-    """Tokens for one candidate frame after the long-edge cap is applied."""
+    """Tokens for one candidate frame after the long-edge cap is applied.
+
+    Delegated to the active provider, because the two vendors disagree by
+    nearly 5x on the same image and images are ~88% of this pipeline's spend.
+    Estimating both with one formula would misprice a run by more than the
+    whole budget.
+    """
+    from .client import get_provider
+
     long_edge = cfg.frames.llm_max_edge_px
     if aspect >= 1:
         w, h = long_edge, int(long_edge / aspect)
     else:
         w, h = int(long_edge * aspect), long_edge
-    return image_tokens(w, h)
+    return type(get_provider(cfg)).image_tokens(cfg, w, h)
 
 
 def price(cfg: Config, model: str, tokens_in: int, tokens_out: int) -> float:

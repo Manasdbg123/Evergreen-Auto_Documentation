@@ -27,9 +27,12 @@ exports, cut everything else. Never cut the diff.
 - **Frontend:** React + Vite + TypeScript, TipTap editor
 - **Video:** ffmpeg, OpenCV
 - **Transcription:** faster-whisper, local, CPU. No OpenAI API.
-- **LLM:** Anthropic only, one key from `ANTHROPIC_API_KEY`
-  - `claude-haiku-4-5-20251001` — classification, step-boundary detection
-  - `claude-sonnet-5` — instruction text, vision on screenshots
+- **LLM:** one key, one vendor at a time, chosen by `llm.provider`
+  - `anthropic` (the brief's requirement, and the documented default):
+    `claude-haiku-4-5-20251001` classify, `claude-sonnet-5` structure/vision
+  - `gemini` (what the demo currently runs on): `gemini-2.5-flash` for both
+  - No stage knows which is active. Prompts, schemas and cost accounting are
+    shared; only the transport differs.
 - **Storage:** local filesystem + SQLite. No cloud, S3, or Postgres.
 
 ## Pipeline
@@ -132,7 +135,9 @@ python -m pytest tests/ -q
 
 - ffmpeg 4.4.2 at `/usr/bin/ffmpeg`. `resolve_ffmpeg()` prefers system, falls
   back to the `imageio-ffmpeg` bundled binary (no sudo available here).
-- `ANTHROPIC_API_KEY` is **not set**. `llm.offline: auto` in config.yaml makes
+- Keys load from `.env` at the repo root (gitignored). `GEMINI_API_KEY` is set
+  and working; `ANTHROPIC_API_KEY` is not available. `llm.provider: gemini`.
+- `llm.offline: auto` in config.yaml makes
   `detect_steps` and `structure` fall back to a deterministic placeholder path
   (`app/llm/offline.py`) so everything downstream is buildable and demoable
   with zero spend. Its output is schema-identical, marked `[offline]`, and
@@ -156,16 +161,40 @@ python -m pytest tests/ -q
   Raising resolution made SSIM *worse*. Hence `ink_mask` in `pipeline/video.py`:
   mask to pixels darker than their local neighbourhood, compare IoU. Same
   measurement separates 0.990 vs 0.756.
-- **Cost is ~88% images.** `candidates.max_frames` is the dominant lever.
-  Per 5-min video: $0.137 (77% input / 23% output). Per update: $0.141.
+- **Cost is ~88% images**, so the per-image token rate dominates everything.
+  `candidates.max_frames` is the second lever. Per 5-min video:
+  Anthropic $0.137, Gemini Flash $0.014. A $5 budget buys 35 updates on
+  Anthropic, 319 on Gemini.
+- **Gemini bills images per tile, Anthropic per pixel.** Measured with
+  `count_tokens` on one 1280x720 frame: gemini-2.5-flash 259 tokens,
+  gemini-3.5-flash 1101, Anthropic 1229 (w*h/750). A shared formula would
+  misprice a run by more than the entire budget, so `image_tokens` is part of
+  the provider contract and the Gemini numbers live in `cost.image_tokens`.
+- **Gemini bills thought tokens as output.** 434 thought tokens to produce a
+  14-token classification — the reasoning cost 30x the answer.
+  `models.thinking_budget: 0` disables it; `GeminiUsage` folds thoughts into
+  output tokens so `cost.jsonl` cannot under-report.
+- **Gemini rejects `additionalProperties`** (400). Schemas are authored in
+  Anthropic's stricter dialect and narrowed on the way out; safe only because
+  Gemini's constrained decoding cannot emit an unnamed key anyway.
+- **Free-tier Gemini keys cannot use the Pro models** (429 RESOURCE_EXHAUSTED),
+  and `gemini-2.5-pro` is closed to new keys entirely. Flash reads screen text
+  correctly on the fixture, which is the only vision capability needed here.
 
 ## Open items
 
 - No SQLite (`db.py`), no FastAPI app (`main.py`, `routes/`), no export stage,
   no `diff` stage wrapper around `DiffEngine`.
 - `client/` is still the old Next.js app, not Vite.
-- The LLM path in `detect_steps`/`structure` is tested against a stub client,
-  never against the real API — no key has been available to run it once.
+- The Anthropic provider is tested against a stub only — no key to run it once.
+  The Gemini provider has been run end to end on both fixtures.
+- **The LLM judge is not wired.** `similarity.use_llm_judge` is true and
+  `DiffEngine` accepts a `judge` callable, but nothing constructs one, so
+  ambiguous pairs fall through to the offline score. On the two real generated
+  SOPs, 5 of 6 pairs landed in the ambiguous band and one verdict is wrong
+  because of it: `expected_result` "The Dashboard screen appears." vs "You are
+  redirected to the Dashboard." scored under `field_rewrite_threshold` (0.72)
+  and reported `modified`. The judge exists to settle exactly this.
 
 ## Diff engine findings
 

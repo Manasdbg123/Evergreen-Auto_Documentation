@@ -14,13 +14,13 @@ from __future__ import annotations
 from typing import Any
 
 from ..config import Config
-from ..llm.client import LLMClient
+from ..llm.client import LLMProvider, get_provider
 from ..llm.cost import CostLog
 from .base import JobPaths, Stage
 
 
 class LLMStage(Stage):
-    """A stage that may call Anthropic, and must behave when it cannot."""
+    """A stage that may call a model vendor, and must behave when it cannot."""
 
     def __init__(self, cfg: Config | None = None, offline: bool | None = None):
         super().__init__(cfg)
@@ -28,15 +28,15 @@ class LLMStage(Stage):
         self.offline = (
             offline if offline is not None else self.cfg.llm.offline == "always"
         )
-        self._client: LLMClient | None = None
+        self._client: LLMProvider | None = None
         self._cost: CostLog | None = None
 
     # ------------------------------------------------------------------
 
-    def client(self, job: JobPaths) -> LLMClient:
+    def client(self, job: JobPaths) -> LLMProvider:
         if self._client is None:
             self._cost = CostLog(self.cfg, job.cost_log)
-            self._client = LLMClient(self.cfg, self._cost)
+            self._client = get_provider(self.cfg, self._cost)
         return self._client
 
     def resolve_mode(self, job: JobPaths) -> str:
@@ -53,13 +53,14 @@ class LLMStage(Stage):
 
         client = self.client(job)
         if client.available:
+            print(f"[{self.name}] provider: {client.name}")
             return "llm"
 
         if self.cfg.llm.offline == "never":
             raise RuntimeError(
                 f"[{self.name}] {client.unavailable_reason}, and llm.offline is "
-                f"'never'. Set ANTHROPIC_API_KEY, or set llm.offline: auto in "
-                f"config.yaml to allow the placeholder path."
+                f"'never'. Set {self.cfg.key_env_var} in .env, or set "
+                f"llm.offline: auto in config.yaml to allow the placeholder path."
             )
 
         print(

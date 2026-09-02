@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = REPO_ROOT / "config.yaml"
@@ -121,25 +121,57 @@ class SimilarityConfig(BaseModel):
     use_llm_judge: bool = True
 
 
-class LLMConfig(BaseModel):
-    """What to do when there is no usable API key.
+Provider = Literal["anthropic", "gemini"]
 
-    `auto`   fall back to the offline placeholder path, loudly.
-    `never`  fail the stage instead — the right setting for a real client run,
-             where placeholder text silently replacing a real SOP is worse
-             than a stopped pipeline.
-    `always` never call the API, even when a key is present.
+#: Which environment variable holds each provider's key.
+PROVIDER_KEY_ENV: dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+}
+
+
+class ProviderModels(BaseModel):
+    """Model ids for one vendor. Only the active provider's block is used."""
+
+    classify: str
+    structure: str
+    judge: str
+
+
+class LLMConfig(BaseModel):
+    """Which vendor to call, and what to do when we cannot call one.
+
+    `offline`:
+      `auto`   fall back to the offline placeholder path, loudly.
+      `never`  fail the stage instead — the right setting for a real client
+               run, where placeholder text silently replacing a real SOP is
+               worse than a stopped pipeline.
+      `always` never call the API, even when a key is present.
     """
 
+    provider: Provider = "anthropic"
     offline: Literal["auto", "never", "always"] = "auto"
+    providers: dict[str, ProviderModels] = {}
 
 
 class ModelsConfig(BaseModel):
+    """The *resolved* model ids, populated from the active provider's block.
+
+    Every stage reads `cfg.models.classify` and friends without knowing which
+    vendor is behind them, which is the point: switching provider is a config
+    line, not a code change.
+    """
+
     classify: str = "claude-haiku-4-5-20251001"
     structure: str = "claude-sonnet-5"
     judge: str = "claude-haiku-4-5-20251001"
     max_tokens: int = 8000
     temperature: float = 0.0
+    #: Gemini only. Its 2.5+ models think by default and bill thought tokens as
+    #: output, which on short classification answers cost more than the answer
+    #: itself (measured: 434 thought tokens for a 14-token reply). 0 disables.
+    #: None leaves the vendor default alone. Ignored by Anthropic.
+    thinking_budget: int | None = None
 
 
 class TokenPrice(BaseModel):
@@ -149,6 +181,10 @@ class TokenPrice(BaseModel):
 
 class CostConfig(BaseModel):
     pricing: dict[str, TokenPrice] = {}
+    #: Gemini only, and per model: it bills images per tile, not per pixel, so
+    #: the cost is flat across every size this pipeline produces. Measured with
+    #: count_tokens rather than assumed. Anthropic's w*h/750 needs no table.
+    image_tokens: dict[str, int] = {}
     max_usd_per_job: float = 0.75
     warn_usd_per_job: float = 0.35
 
@@ -174,7 +210,33 @@ class Config(BaseModel):
     cost: CostConfig = Field(default_factory=CostConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
 
+    @model_validator(mode="after")
+    def _resolve_active_provider(self) -> "Config":
+        """Copy the active provider's model ids into `models`.
+
+        Done on every validation, so no stage ever branches on provider to pick
+        a model name.
+
+        The provider block is unconditionally authoritative. An earlier version
+        let an explicit `models.classify` override it, which cannot work: after
+        a `model_dump` round-trip — which is exactly what `merged_with` does,
+        and what a per-job config override from the API will do — the resolved
+        values look indistinguishable from hand-written ones, so switching
+        provider silently kept the previous vendor's models. To override one
+        model, edit its provider block.
+        """
+        block = self.llm.providers.get(self.llm.provider)
+        if block is None:
+            return self
+        for field in ("classify", "structure", "judge"):
+            setattr(self.models, field, getattr(block, field))
+        return self
+
     # ---- derived helpers -------------------------------------------------
+
+    @property
+    def key_env_var(self) -> str:
+        return PROVIDER_KEY_ENV[self.llm.provider]
 
     @property
     def data_root(self) -> Path:
@@ -215,10 +277,29 @@ def _deep_merge(base: dict, over: dict) -> dict:
 
 @lru_cache(maxsize=1)
 def load_config() -> Config:
+    load_dotenv()
     raw: dict[str, Any] = {}
     if CONFIG_PATH.exists():
         raw = yaml.safe_load(CONFIG_PATH.read_text()) or {}
     return Config.model_validate(raw)
+
+
+def load_dotenv() -> None:
+    """Read `.env` at the repo root into the environment.
+
+    Deliberately hand-rolled and non-overriding: a key already exported in the
+    shell wins over the file. Keeps API keys out of shell history and off the
+    command line, where they end up in `ps` output and scrollback.
+    """
+    path = REPO_ROOT / ".env"
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
 def resolve_ffmpeg(cfg: Config | None = None) -> str:
@@ -247,3 +328,9 @@ def resolve_ffmpeg(cfg: Config | None = None) -> str:
 
 def anthropic_key() -> str | None:
     return os.environ.get("ANTHROPIC_API_KEY")
+
+
+def provider_key(cfg: Config | None = None) -> str | None:
+    """The API key for whichever provider is active."""
+    cfg = cfg or load_config()
+    return os.environ.get(cfg.key_env_var)

@@ -150,7 +150,14 @@ similarity:
   use_llm_judge: true
 
 llm:
-  # What to do when ANTHROPIC_API_KEY is missing or the SDK is not installed.
+  # Which vendor answers. No pipeline stage knows or branches on this — the
+  # prompts, schemas and cost accounting are shared, and only the transport
+  # differs. Swapping vendors is this one line plus the matching key.
+  #   anthropic  reads ANTHROPIC_API_KEY
+  #   gemini     reads GEMINI_API_KEY
+  provider: gemini
+
+  # What to do when the active provider's key is missing or its SDK absent.
   #   auto    run the offline placeholder path instead, with a loud warning.
   #           Lets the diff engine, editor and exports be built and demoed
   #           with no key and no spend. Output is clearly marked "[offline]".
@@ -159,13 +166,31 @@ llm:
   #   always  never call the API even when a key is present.
   offline: auto
 
+  # Model ids per vendor. The active provider's block is copied into models.*
+  # at load time, so every stage reads models.classify without knowing whose.
+  providers:
+    anthropic:
+      classify: claude-haiku-4-5-20251001  # step boundaries, noise rejection
+      structure: claude-sonnet-5           # instruction writing + vision
+      judge: claude-haiku-4-5-20251001     # diff adjudication
+    gemini:
+      # Flash for all three. Pro is unavailable on free-tier keys (429), and
+      # measured on the fixture Flash reads screen text correctly — which is
+      # the only vision capability this pipeline actually needs.
+      classify: gemini-2.5-flash
+      structure: gemini-2.5-flash
+      judge: gemini-2.5-flash
+
 models:
-  # Anthropic only. One key: ANTHROPIC_API_KEY.
-  classify: claude-haiku-4-5-20251001   # step-boundary detection, noise rejection
-  structure: claude-sonnet-5            # instruction writing + vision
-  judge: claude-haiku-4-5-20251001      # diff adjudication
+  # Resolved from llm.providers[llm.provider]. Set a value here to override one
+  # model without redefining the whole provider block.
   max_tokens: 8000
   temperature: 0
+  # Gemini only. Its 2.5+ models reason before answering and bill thought
+  # tokens as OUTPUT. Measured: 434 thought tokens to produce a 14-token
+  # classification — the reasoning cost 30x the answer. 0 disables it, null
+  # leaves the vendor default. Ignored by Anthropic.
+  thinking_budget: 0
 
 cost:
   # Logged to data/jobs/{job_id}/cost.jsonl and echoed to stdout.
@@ -173,6 +198,17 @@ cost:
   pricing:
     claude-haiku-4-5-20251001: { input: 1.00, output: 5.00 }
     claude-sonnet-5: { input: 2.00, output: 10.00 }
+    gemini-2.5-flash: { input: 0.30, output: 2.50 }
+    gemini-2.5-flash-lite: { input: 0.10, output: 0.40 }
+    gemini-3-flash: { input: 0.50, output: 3.00 }
+    gemini-3.5-flash: { input: 1.50, output: 9.00 }
+  # Gemini bills images per tile, not per pixel, so one number covers every
+  # size this pipeline produces. Measured with count_tokens on a 1280x720
+  # frame — do not guess these, the two models differ by 4x.
+  # Anthropic needs no entry: it bills w*h/750.
+  image_tokens:
+    gemini-2.5-flash: 259
+    gemini-3.5-flash: 1101
   # Abort a job rather than blow the budget.
   max_usd_per_job: 0.75
   warn_usd_per_job: 0.35
