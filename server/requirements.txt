@@ -1,0 +1,21 @@
+# Stage 1 — ingest, frames, change detection (no API key needed)
+fastapi>=0.115
+uvicorn[standard]
+python-multipart
+pydantic>=2
+pyyaml
+numpy
+opencv-python-headless
+pillow
+imagehash
+scikit-image
+imageio-ffmpeg          # static ffmpeg binary; no sudo required
+
+# Stage 2 — transcription (local CPU, no API)
+faster-whisper
+
+# Stages 5-8 — Anthropic only
+anthropic
+
+# Diff tier 2 — local embeddings, offline, no API key
+sentence-transformers

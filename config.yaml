@@ -1,0 +1,150 @@
+# Evergreen — the complete tunable surface.
+# Everything a client would want to tweak lives here and nowhere else.
+# Any value can be overridden per-job by POSTing a partial config with the upload.
+
+paths:
+  data_dir: data
+  db_path: data/evergreen.db
+  # Leave null to auto-resolve: system ffmpeg first, then the pip-bundled binary.
+  ffmpeg_bin: null
+
+ingest:
+  allowed_extensions: [.mp4, .mov, .webm, .mkv]
+  max_upload_mb: 2048
+
+transcribe:
+  enabled: true
+  # faster-whisper model size. tiny/base/small/medium. CPU-bound, so keep it small.
+  model: base
+  device: cpu
+  compute_type: int8
+  language: null          # null = autodetect
+  # The vision-only path is authoritative. If transcription fails for any
+  # reason the pipeline continues with an empty transcript.
+  required: false
+
+frames:
+  sample_fps: 2.0
+  # Frames are hashed/compared at this width; full-res is only kept for
+  # the frames that survive to become screenshots.
+  analysis_width: 320
+  # Long edge cap applied before any image is sent to the LLM.
+  llm_max_edge_px: 1568
+  screenshot_format: png
+
+change_detection:
+  # Detection is ADAPTIVE by default, because the frame-to-frame noise floor
+  # is a property of the recording (codec, resolution, how much of the screen
+  # is uniform chrome), not a constant. A fixed threshold that works on one
+  # video silently returns zero events on the next. See adaptive.* below.
+  adaptive:
+    enabled: true
+    # Rolling window, in samples, used to estimate the noise floor.
+    window: 15
+    # Flag a frame when its dissimilarity exceeds median + k * MAD.
+    k: 3.5
+    # ...and is at least this multiple of the rolling median. Stops a
+    # perfectly static recording from firing on pure compression jitter.
+    min_ratio: 1.6
+    # ...and clears this absolute dissimilarity, as a final floor.
+    abs_floor: 0.004
+  # Absolute backstop for unambiguous full-screen changes. Always fires,
+  # regardless of the adaptive verdict. Set to 0 to rely purely on adaptive.
+  hard_change_threshold: 0.75
+  # A frame is "stable" when its similarity to the NEXT frame is above this,
+  # OR when its dissimilarity is within stability_ratio of the noise floor.
+  stability_threshold: 0.985
+  stability_ratio: 2.0
+  # The opening screen is a step even though nothing changed to produce it.
+  # With this off, every SOP silently starts at step 2.
+  include_initial_state: true
+  # Wait this long after a change before accepting a frame as the stable one.
+  # Guards against mid-transition blur and loading spinners.
+  settle_delay_ms: 350
+  # Give up hunting for a stable frame after this long and take the best seen.
+  max_settle_wait_ms: 2500
+  # Perceptual-hash distance (0-64) above which two frames are "different".
+  # Corroborating signal, OR'd with the adaptive verdict rather than AND'd:
+  # pHash catches changes SSIM dilutes (a dialog over a mostly-white page),
+  # and SSIM catches changes too small to move a 64-bit hash. Requiring both
+  # misses roughly half of real transitions.
+  phash_distance_threshold: 6
+  # Merge change events whose stable frames land closer together than this.
+  min_event_gap_ms: 1000
+  # Ignore the bottom N% of the frame (taskbars, OS clocks, notification
+  # toasts) when comparing. Set to 0 to disable.
+  ignore_bottom_pct: 0.0
+  ignore_top_pct: 0.0
+
+candidates:
+  # Hard bounds on how many frames may ever reach a vision call. Cost critical.
+  min_frames: 8
+  max_frames: 25
+  # When over budget, events are ranked by this blend of signals before culling.
+  rank_weights:
+    visual_magnitude: 0.5   # how big the visual change was
+    stability: 0.2          # how cleanly the frame settled
+    transcript_overlap: 0.2 # narration happening at that moment
+    temporal_spread: 0.1    # prefer coverage across the whole video
+  # Never let two candidates be closer together than this.
+  min_spacing_ms: 1200
+
+steps:
+  # Rough target. The model may return fewer if the workflow is short.
+  target_count: null        # null = let the model decide within bounds
+  min_count: 2
+  max_count: 30
+  granularity: normal       # coarse | normal | fine
+
+writing:
+  tone: neutral             # neutral | friendly | formal | terse
+  audience: "an internal team member who has not used this tool before"
+  person: second            # second = "Click Save", imperative
+  max_instruction_words: 45
+
+diff:
+  # Below this, two steps are not the same step at all -> added/removed.
+  match_threshold: 0.62
+  # Above this, treat as unchanged without further inspection.
+  identical_threshold: 0.94
+  # Pairs landing between these two bounds are escalated to the LLM judge.
+  ambiguous_band: [0.62, 0.94]
+  # Only consult screenshots when text comparison is still ambiguous.
+  use_visual_fallback: true
+  visual_phash_threshold: 10
+  # Cap on how many pairs may ever be escalated to a vision call per diff.
+  max_visual_comparisons: 6
+  # A matched pair outside the longest-increasing-subsequence is "reordered".
+  # Requires a match at least this strong to claim reorder over remove+add.
+  reorder_min_similarity: 0.78
+
+similarity:
+  # Tier 1 lexical prefilter is always on and free.
+  # Tier 2 local embedding model — no API key, runs offline on CPU.
+  embedding_model: sentence-transformers/all-MiniLM-L6-v2
+  use_embeddings: true
+  # Tier 3 LLM adjudication, ambiguous band only.
+  use_llm_judge: true
+
+models:
+  # Anthropic only. One key: ANTHROPIC_API_KEY.
+  classify: claude-haiku-4-5-20251001   # step-boundary detection, noise rejection
+  structure: claude-sonnet-5            # instruction writing + vision
+  judge: claude-haiku-4-5-20251001      # diff adjudication
+  max_tokens: 8000
+  temperature: 0
+
+cost:
+  # Logged to data/jobs/{job_id}/cost.jsonl and echoed to stdout.
+  # USD per million tokens.
+  pricing:
+    claude-haiku-4-5-20251001: { input: 1.00, output: 5.00 }
+    claude-sonnet-5: { input: 3.00, output: 15.00 }
+  # Abort a job rather than blow the budget.
+  max_usd_per_job: 0.75
+  warn_usd_per_job: 0.35
+
+cache:
+  # Every stage writes stages/NN_name.json and is skipped on re-run when its
+  # inputs are unchanged. Set false to force recomputation of everything.
+  enabled: true
