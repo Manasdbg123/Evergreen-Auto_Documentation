@@ -88,6 +88,18 @@ candidates:
     temporal_spread: 0.1    # prefer coverage across the whole video
   # Never let two candidates be closer together than this.
   min_spacing_ms: 1200
+  # Drop a candidate that shows a screen an earlier candidate already shows —
+  # returning to a page you have already captured is not a new step, and it
+  # costs a full vision call. Compared with the ink-mask signature, since
+  # SSIM and pHash cannot tell two same-template screens apart.
+  # Set to 1.0 to disable deduplication.
+  dedupe_ink_iou: 0.92
+
+visual:
+  # Screen-identity fingerprint. See pipeline/video.py:ink_mask for why this
+  # exists rather than plain SSIM or pHash.
+  ink_width: 512
+  ink_delta: 12
 
 steps:
   # Rough target. The model may return fewer if the workflow is short.
@@ -111,7 +123,12 @@ diff:
   ambiguous_band: [0.62, 0.94]
   # Only consult screenshots when text comparison is still ambiguous.
   use_visual_fallback: true
-  visual_phash_threshold: 10
+  # Ink-mask IoU above which two screenshots show the same screen. NOT pHash:
+  # measured on the fixture, pHash rates two genuinely different screens at
+  # distance 2 while a true duplicate scores 0, so any pHash threshold that
+  # catches duplicates also merges unrelated steps.
+  visual_same_screen_iou: 0.92
+  visual_different_screen_iou: 0.55
   # Cap on how many pairs may ever be escalated to a vision call per diff.
   max_visual_comparisons: 6
   # A matched pair outside the longest-increasing-subsequence is "reordered".

@@ -15,7 +15,7 @@ from typing import Any
 
 from ..models import CandidateFrame, ChangeEvent, Transcript
 from .base import JobPaths, Stage, read_stage
-from .video import resize_for_llm
+from .video import ink_iou, ink_mask_from_path, resize_for_llm
 
 
 class SelectCandidatesStage(Stage):
@@ -60,6 +60,7 @@ class SelectCandidatesStage(Stage):
                     chosen.append((score, e))
 
         chosen.sort(key=lambda pair: pair[1].stable_timestamp)
+        chosen, dropped = self._drop_duplicate_screens(job, chosen)
 
         for stale in job.llm_frames.glob("*"):
             stale.unlink()
@@ -96,10 +97,55 @@ class SelectCandidatesStage(Stage):
         return {
             "count": len(candidates),
             "from_events": len(events),
+            "deduped": len(dropped),
             "candidates": [c.model_dump() for c in candidates],
         }
 
     # ----------------------------------------------------------------------
+
+    def _drop_duplicate_screens(self, job: JobPaths, chosen: list) -> tuple[list, list]:
+        """Remove candidates showing a screen an earlier candidate already shows.
+
+        Alt-tabbing away and back, or navigating out of a page and returning,
+        produces a change event for the return trip — but the return is not a
+        new step, and each one costs a full vision call.
+
+        Uses the ink-mask signature rather than SSIM or pHash, both of which
+        rate two genuinely different screens closer together than they rate a
+        true duplicate when the screens share a UI template.
+        """
+        threshold = self.cfg.candidates.dedupe_ink_iou
+        if threshold >= 1.0 or len(chosen) < 2:
+            return chosen, []
+
+        kept: list = []
+        kept_masks: list = []
+        dropped: list = []
+        vis = self.cfg.visual
+
+        for score, e in chosen:
+            mask = ink_mask_from_path(job.abs(e.stable_frame_path), vis.ink_width, vis.ink_delta)
+            if mask is None:
+                kept.append((score, e))
+                continue
+            match = next(
+                ((i, ink_iou(mask, m)) for i, m in enumerate(kept_masks)
+                 if ink_iou(mask, m) >= threshold),
+                None,
+            )
+            if match is not None:
+                idx, iou = match
+                dropped.append((e, kept[idx][1], iou))
+                continue
+            kept.append((score, e))
+            kept_masks.append(mask)
+
+        for e, dup_of, iou in dropped:
+            print(
+                f"[select_candidates] dropped t={e.stable_timestamp:.2f}s — same screen as "
+                f"t={dup_of.stable_timestamp:.2f}s (ink IoU {iou:.3f}), saving a vision call"
+            )
+        return kept, dropped
 
     def _score(self, e: ChangeEvent, all_events, transcript: Transcript, duration: float) -> float:
         w = self.cfg.candidates.rank_weights

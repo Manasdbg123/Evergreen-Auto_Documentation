@@ -81,6 +81,12 @@ class CandidatesConfig(BaseModel):
     max_frames: int = 25
     rank_weights: RankWeights = Field(default_factory=RankWeights)
     min_spacing_ms: int = 1200
+    dedupe_ink_iou: float = 0.92
+
+
+class VisualConfig(BaseModel):
+    ink_width: int = 512
+    ink_delta: int = 12
 
 
 class StepsConfig(BaseModel):
@@ -102,7 +108,8 @@ class DiffConfig(BaseModel):
     identical_threshold: float = 0.94
     ambiguous_band: tuple[float, float] = (0.62, 0.94)
     use_visual_fallback: bool = True
-    visual_phash_threshold: int = 10
+    visual_same_screen_iou: float = 0.92
+    visual_different_screen_iou: float = 0.55
     max_visual_comparisons: int = 6
     reorder_min_similarity: float = 0.78
 
@@ -145,6 +152,7 @@ class Config(BaseModel):
     candidates: CandidatesConfig = Field(default_factory=CandidatesConfig)
     steps: StepsConfig = Field(default_factory=StepsConfig)
     writing: WritingConfig = Field(default_factory=WritingConfig)
+    visual: VisualConfig = Field(default_factory=VisualConfig)
     diff: DiffConfig = Field(default_factory=DiffConfig)
     similarity: SimilarityConfig = Field(default_factory=SimilarityConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)

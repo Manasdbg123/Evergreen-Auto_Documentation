@@ -121,6 +121,47 @@ def ssim(a: np.ndarray, b: np.ndarray) -> float:
     return float(structural_similarity(a, b, win_size=win, data_range=255))
 
 
+def ink_mask(frame_bgr: np.ndarray, width: int = 512, delta: int = 12) -> np.ndarray:
+    """Binary mask of "ink": text, borders, icons — everything but background.
+
+    Screens built from the same UI template (a white panel, one field, a
+    button) are nearly indistinguishable to both SSIM and pHash: measured on
+    the fixture, two *different* screens scored SSIM 0.979 against a true
+    duplicate's 0.992, and pHash distance 2 against a duplicate's 0. Raising
+    the comparison resolution makes SSIM *worse*, because the uniform
+    background dominates more, not less.
+
+    What actually distinguishes those screens is where the text sits. Masking
+    to ink and comparing coverage ignores the background entirely and pushes
+    the same measurement apart to 0.990 vs 0.756 — a usable margin.
+
+    Local rather than global thresholding, so dark-mode UIs work too: ink is
+    any pixel notably darker than its own neighbourhood.
+    """
+    h = max(int(width * frame_bgr.shape[0] / frame_bgr.shape[1]), 1)
+    small = cv2.resize(frame_bgr, (width, h), interpolation=cv2.INTER_AREA)
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    background = cv2.GaussianBlur(gray, (31, 31), 0)
+    diff = background.astype(np.int16) - gray.astype(np.int16)
+    # abs() so light-on-dark text counts as ink as well.
+    return (np.abs(diff) > delta).astype(np.uint8)
+
+
+def ink_iou(a: np.ndarray, b: np.ndarray) -> float:
+    """Intersection-over-union of two ink masks. 1.0 = the same screen."""
+    if a.shape != b.shape:
+        b = cv2.resize(b, (a.shape[1], a.shape[0]), interpolation=cv2.INTER_NEAREST)
+    union = np.logical_or(a, b).sum()
+    if union == 0:
+        return 1.0
+    return float(np.logical_and(a, b).sum() / union)
+
+
+def ink_mask_from_path(path: Path, width: int = 512, delta: int = 12) -> np.ndarray | None:
+    img = cv2.imread(str(path))
+    return None if img is None else ink_mask(img, width, delta)
+
+
 def phash_of(frame_bgr: np.ndarray) -> imagehash.ImageHash:
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     return imagehash.phash(Image.fromarray(rgb))
