@@ -156,7 +156,7 @@ cost:
   # USD per million tokens.
   pricing:
     claude-haiku-4-5-20251001: { input: 1.00, output: 5.00 }
-    claude-sonnet-5: { input: 3.00, output: 15.00 }
+    claude-sonnet-5: { input: 2.00, output: 10.00 }
   # Abort a job rather than blow the budget.
   max_usd_per_job: 0.75
   warn_usd_per_job: 0.35

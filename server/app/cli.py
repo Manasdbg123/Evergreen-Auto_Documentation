@@ -135,6 +135,32 @@ def cmd_contact_sheet(args) -> int:
     return 0
 
 
+def cmd_estimate_cost(args) -> int:
+    """Predict spend before committing to it. No API key, no calls."""
+    from .llm.cost import (capped_image_tokens, estimate_diff, estimate_job,
+                           format_estimate)
+
+    cfg = load_config()
+    print(f"\nimage tokens per frame (16:9, capped at {cfg.frames.llm_max_edge_px}px): "
+          f"{capped_image_tokens(cfg):,}\n")
+
+    job = estimate_job(cfg, args.minutes, has_transcript=not args.no_audio)
+    print(format_estimate(job, f"ONE {args.minutes:g}-MINUTE VIDEO"))
+    steps = job[1].images
+
+    text_diff = estimate_diff(cfg, steps)
+    print("\n" + format_estimate(text_diff, "DIFF (text tiers only — the normal path)"))
+
+    worst = estimate_diff(cfg, steps, visual=cfg.diff.max_visual_comparisons)
+    print("\n" + format_estimate(worst, "DIFF (worst case — visual fallback maxed)"))
+
+    per_video = sum(r.usd for r in job)
+    demo = 2 * per_video + sum(r.usd for r in text_diff)
+    print(f"\n  full demo (v1 + v2 + diff) = ${demo:.4f}")
+    print(f"  a $5 budget buys ~{int(5 / demo)} complete demos\n")
+    return 0
+
+
 def cmd_config(args) -> int:
     print(json.dumps(load_config().model_dump(), indent=2, default=str))
     return 0
@@ -168,6 +194,11 @@ def main() -> int:
     cs = sub.add_parser("contact-sheet", help="tile chosen frames into one image")
     cs.add_argument("job_id")
     cs.set_defaults(func=cmd_contact_sheet)
+
+    ec = sub.add_parser("estimate-cost", help="predict API spend for a video length")
+    ec.add_argument("--minutes", type=float, default=5.0)
+    ec.add_argument("--no-audio", action="store_true", help="assume no transcript")
+    ec.set_defaults(func=cmd_estimate_cost)
 
     c = sub.add_parser("config", help="print the resolved config")
     c.set_defaults(func=cmd_config)
