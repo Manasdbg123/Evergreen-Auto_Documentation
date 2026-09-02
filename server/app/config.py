@@ -11,7 +11,7 @@ import os
 import shutil
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -121,6 +121,19 @@ class SimilarityConfig(BaseModel):
     use_llm_judge: bool = True
 
 
+class LLMConfig(BaseModel):
+    """What to do when there is no usable API key.
+
+    `auto`   fall back to the offline placeholder path, loudly.
+    `never`  fail the stage instead — the right setting for a real client run,
+             where placeholder text silently replacing a real SOP is worse
+             than a stopped pipeline.
+    `always` never call the API, even when a key is present.
+    """
+
+    offline: Literal["auto", "never", "always"] = "auto"
+
+
 class ModelsConfig(BaseModel):
     classify: str = "claude-haiku-4-5-20251001"
     structure: str = "claude-sonnet-5"
@@ -156,6 +169,7 @@ class Config(BaseModel):
     visual: VisualConfig = Field(default_factory=VisualConfig)
     diff: DiffConfig = Field(default_factory=DiffConfig)
     similarity: SimilarityConfig = Field(default_factory=SimilarityConfig)
+    llm: LLMConfig = Field(default_factory=LLMConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     cost: CostConfig = Field(default_factory=CostConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)

@@ -149,6 +149,16 @@ similarity:
   # Tier 3 LLM adjudication, ambiguous band only.
   use_llm_judge: true
 
+llm:
+  # What to do when ANTHROPIC_API_KEY is missing or the SDK is not installed.
+  #   auto    run the offline placeholder path instead, with a loud warning.
+  #           Lets the diff engine, editor and exports be built and demoed
+  #           with no key and no spend. Output is clearly marked "[offline]".
+  #   never   fail the stage. Correct for a real client run — placeholder text
+  #           quietly standing in for a real SOP is worse than stopping.
+  #   always  never call the API even when a key is present.
+  offline: auto
+
 models:
   # Anthropic only. One key: ANTHROPIC_API_KEY.
   classify: claude-haiku-4-5-20251001   # step-boundary detection, noise rejection

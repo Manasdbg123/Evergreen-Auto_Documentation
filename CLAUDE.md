@@ -119,6 +119,8 @@ design choice will make the diff engine harder later.
 ```bash
 source .venv/bin/activate && cd server
 python -m app.cli new --video ~/rec.mp4      # ingest → candidates
+python -m app.cli run <job_id> [--offline]   # whole pipeline → SOP
+python -m app.cli show <job_id> [--json]     # print the generated SOP
 python -m app.cli contact-sheet <job_id>     # visual check of chosen frames
 python -m app.cli inspect <job_id>           # what ran, what it found
 python -m app.cli <stage> <job_id> --force   # re-run one stage
@@ -130,7 +132,16 @@ python -m pytest tests/ -q
 
 - ffmpeg 4.4.2 at `/usr/bin/ffmpeg`. `resolve_ffmpeg()` prefers system, falls
   back to the `imageio-ffmpeg` bundled binary (no sudo available here).
-- `ANTHROPIC_API_KEY` is **not set**. Stages 5–6 cannot run yet.
+- `ANTHROPIC_API_KEY` is **not set**. `llm.offline: auto` in config.yaml makes
+  `detect_steps` and `structure` fall back to a deterministic placeholder path
+  (`app/llm/offline.py`) so everything downstream is buildable and demoable
+  with zero spend. Its output is schema-identical, marked `[offline]`, and
+  always `confidence: low`; it never guesses a `ui_element.label`, because a
+  fabricated label is indistinguishable from a real one to the diff engine.
+  Set `llm.offline: never` for a real client run.
+- Model ids in `models.*` carry the date suffix the brief specifies
+  (`claude-haiku-4-5-20251001`). Current Anthropic ids are undated
+  (`claude-haiku-4-5`); `llm/client.py` catches the resulting 404 and says so.
 - The pre-existing TypeScript/Next.js implementation is parked in `server/src`
   and `client/`, snapshotted at commit `0c3dbf1`. Not yet replaced.
 
@@ -150,9 +161,11 @@ python -m pytest tests/ -q
 
 ## Open items
 
-- Stages 5-6 (`detect_steps`, `structure`) need `ANTHROPIC_API_KEY`, not yet set.
-- No SQLite (`db.py`), no FastAPI app (`main.py`, `routes/`), no export stage.
+- No SQLite (`db.py`), no FastAPI app (`main.py`, `routes/`), no export stage,
+  no `diff` stage wrapper around `DiffEngine`.
 - `client/` is still the old Next.js app, not Vite.
+- The LLM path in `detect_steps`/`structure` is tested against a stub client,
+  never against the real API — no key has been available to run it once.
 
 ## Diff engine findings
 

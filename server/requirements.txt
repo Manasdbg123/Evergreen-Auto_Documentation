@@ -19,3 +19,6 @@ anthropic
 
 # Diff tier 2 — local embeddings, offline, no API key
 sentence-transformers
+# Optimal step assignment. Without it the diff degrades to greedy matching,
+# which is order-dependent and measurably worse — see pipeline/diff.py.
+scipy
