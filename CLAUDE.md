@@ -146,7 +146,9 @@ python -m pytest tests/ -q
   mask to pixels darker than their local neighbourhood, compare IoU. Same
   measurement separates 0.990 vs 0.756.
 - **Cost is ~88% images.** `candidates.max_frames` is the dominant lever.
-  Per 5-min video: $0.137 (77% input / 23% output). Per update: $0.141.## Open items
+  Per 5-min video: $0.137 (77% input / 23% output). Per update: $0.141.
+
+## Open items
 
 - Stages 5-6 (`detect_steps`, `structure`) need `ANTHROPIC_API_KEY`, not yet set.
 - No SQLite (`db.py`), no FastAPI app (`main.py`, `routes/`), no export stage.
