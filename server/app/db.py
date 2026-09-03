@@ -156,10 +156,22 @@ def list_jobs(cfg: Config, limit: int = 100) -> list[dict[str, Any]]:
 
 
 def attach_job_to_document(cfg: Config, job_id: str, document_id: str) -> None:
+    """Point a job at a document, creating the job row if it is missing.
+
+    An UPDATE alone silently affected zero rows for any job processed by the
+    CLI before the database existed — leaving `jobs.document_id` NULL, which
+    made `latest_sop_for_job` fall through to its by-job fallback and return a
+    stale pre-edit version. The diff then compared against text the user had
+    already corrected, and reported their own edits back to them as changes.
+    """
+    now = time.time()
     with connect(cfg) as conn:
         conn.execute(
-            "UPDATE jobs SET document_id = ?, updated_at = ? WHERE job_id = ?",
-            (document_id, time.time(), job_id),
+            "INSERT INTO jobs (job_id, document_id, status, created_at, updated_at) "
+            "VALUES (?, ?, 'created', ?, ?) "
+            "ON CONFLICT(job_id) DO UPDATE SET document_id = excluded.document_id, "
+            "updated_at = excluded.updated_at",
+            (job_id, document_id, now, now),
         )
 
 
@@ -212,7 +224,13 @@ def save_version(cfg: Config, document_id: str, sop: SOP, *,
     concurrent saves cannot both claim to be v3 — the UNIQUE constraint on
     (document_id, version) makes that a loud failure rather than a silent
     overwrite of somebody's edit.
+
+    `job_id` falls back to the SOP's own. An edited version has no job of its
+    own, and leaving the column NULL made those versions invisible to
+    `latest_sop_for_job`, which then returned the last *generated* version and
+    diffed against text the user had already fixed.
     """
+    job_id = job_id or sop.job_id or None
     now = time.time()
     with connect(cfg) as conn:
         row = conn.execute(

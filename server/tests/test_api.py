@@ -75,11 +75,40 @@ def client(cfg):
 
 @pytest.fixture
 def document(client, cfg):
-    """A document whose v1 is the demo_v1 SOP."""
-    db.create_job(cfg, DEMO_V1)
+    """A document whose v1 is the demo_v1 SOP.
+
+    Deliberately does NOT pre-create the job row. An earlier version of this
+    fixture did, and that hid a real bug: `attach_job_to_document` was an
+    UPDATE, so for a job processed by the CLI before the database existed it
+    silently matched nothing and the diff went on to compare against pre-edit
+    text. The fixture must exercise the same path a real user does.
+    """
     resp = client.post("/api/documents", json={"job_id": DEMO_V1})
     assert resp.status_code == 200, resp.text
     return resp.json()["document_id"]
+
+
+def test_adopting_a_job_with_no_job_row_still_links_it(client, cfg, document):
+    """A job created by the CLI has no `jobs` row until something makes one.
+
+    If adopting it leaves `jobs.document_id` NULL, `latest_sop_for_job` falls
+    back to the last *generated* version and every later diff silently ignores
+    the user's edits.
+    """
+    record = db.get_job(cfg, DEMO_V1)
+    assert record is not None, "adopting a job must create its row"
+    assert record["document_id"] == document
+
+
+def test_an_edited_version_is_the_one_a_later_diff_reads(client, cfg, document):
+    """`latest_sop_for_job` must return the newest version, edited or not."""
+    sop = client.get(f"/api/documents/{document}").json()["sop"]
+    sop["steps"][0]["instruction"] = "Edited text that the diff must see."
+    client.put(f"/api/documents/{document}", json={"sop": sop})
+
+    latest = db.latest_sop_for_job(cfg, DEMO_V1)
+    assert latest is not None
+    assert latest.steps[0].instruction == "Edited text that the diff must see."
 
 
 def test_health_reports_the_active_provider(client):

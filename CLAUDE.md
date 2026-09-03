@@ -28,7 +28,7 @@ exports, cut everything else. Never cut the diff.
 - **Video:** ffmpeg, OpenCV
 - **Transcription:** faster-whisper, local, CPU. No OpenAI API.
 - **LLM:** one key, one vendor at a time, chosen by `llm.provider`
-  - `anthropic` (the brief's requirement, and the documented default):
+  - `anthropic` (the brief's requirement, and the documented default): 
     `claude-haiku-4-5-20251001` classify, `claude-sonnet-5` structure/vision
   - `gemini` (what the demo currently runs on): `gemini-2.5-flash` for both
   - No stage knows which is active. Prompts, schemas and cost accounting are
@@ -121,15 +121,26 @@ design choice will make the diff engine harder later.
 
 ```bash
 source .venv/bin/activate && cd server
-python -m app.cli new --video ~/rec.mp4      # ingest → candidates
-python -m app.cli run <job_id> [--offline]   # whole pipeline → SOP
-python -m app.cli show <job_id> [--json]     # print the generated SOP
-python -m app.cli contact-sheet <job_id>     # visual check of chosen frames
-python -m app.cli inspect <job_id>           # what ran, what it found
-python -m app.cli <stage> <job_id> --force   # re-run one stage
-python -m app.cli estimate-cost --minutes 5  # predict spend, no key needed
-python -m pytest tests/ -q
+python -m app.cli new --video ~/rec.mp4       # ingest → candidates
+python -m app.cli run <job_id> [--offline]    # whole pipeline → SOP → export
+python -m app.cli run <job_id> --save         # ...and store it as a document v1
+python -m app.cli diff <old_job> <new_job>    # THE demo. --save to version it
+python -m app.cli show <job_id> [--json]      # print the generated SOP
+python -m app.cli contact-sheet <job_id>      # visual check of chosen frames
+python -m app.cli inspect <job_id>            # what ran, what it found
+python -m app.cli <stage> <job_id> --force    # re-run one stage
+python -m app.cli estimate-cost --minutes 5   # predict spend, no key needed
+python -m pytest tests/ -q                    # 64 tests, no API key needed
+
+# Both halves, as the brief requires:
+python -m uvicorn app.main:app --reload --port 8000
+cd ../client && npm install && npm run dev    # http://localhost:5173
+npm run verify                                # SOP <-> editor round-trip check
 ```
+
+`--offline` changes a stage's cache fingerprint, so running it on a job whose
+SOP was generated for real **overwrites that SOP with placeholder text**. Use a
+throwaway job id when exercising the offline path.
 
 ## Environment facts
 
@@ -147,8 +158,16 @@ python -m pytest tests/ -q
 - Model ids in `models.*` carry the date suffix the brief specifies
   (`claude-haiku-4-5-20251001`). Current Anthropic ids are undated
   (`claude-haiku-4-5`); `llm/client.py` catches the resulting 404 and says so.
-- The pre-existing TypeScript/Next.js implementation is parked in `server/src`
-  and `client/`, snapshotted at commit `0c3dbf1`. Not yet replaced.
+- `client/` is now React + Vite + TypeScript with TipTap custom `step` and
+  `screenshot` nodes. The editor schema is deliberately *closed* — no generic
+  paragraph, heading or list — so a user cannot create a block that has nowhere
+  to live in `models.Step` and would be dropped on the next save. Saving is a
+  field-for-field read, never a parse.
+- The pre-existing TypeScript/Next.js implementation is parked in `server/src`,
+  snapshotted at commit `0c3dbf1`. The old Next.js `client/` was replaced; it
+  remains in git history at that commit.
+- `EVERGREEN_DB` overrides `paths.db_path`, so tests and second instances do
+  not write into the demo database.
 
 ## Measured findings that drove design decisions
 
@@ -183,18 +202,23 @@ python -m pytest tests/ -q
 
 ## Open items
 
-- No SQLite (`db.py`), no FastAPI app (`main.py`, `routes/`), no export stage,
-  no `diff` stage wrapper around `DiffEngine`.
-- `client/` is still the old Next.js app, not Vite.
 - The Anthropic provider is tested against a stub only — no key to run it once.
   The Gemini provider has been run end to end on both fixtures.
-- **The LLM judge is not wired.** `similarity.use_llm_judge` is true and
-  `DiffEngine` accepts a `judge` callable, but nothing constructs one, so
-  ambiguous pairs fall through to the offline score. On the two real generated
-  SOPs, 5 of 6 pairs landed in the ambiguous band and one verdict is wrong
-  because of it: `expected_result` "The Dashboard screen appears." vs "You are
-  redirected to the Dashboard." scored under `field_rewrite_threshold` (0.72)
-  and reported `modified`. The judge exists to settle exactly this.
+- The free-tier Gemini key's daily quota is small; a handful of full runs plus
+  judged diffs exhausts it. The offline tiers keep working.
+- `demo_v1`'s SOP text was reconstructed by hand after an `--offline` run
+  overwrote it and the quota blocked regeneration. Provenance (candidate ids,
+  timestamps, phashes, screenshots) is the original; the prose is a faithful
+  transcription, and `_fingerprint` is set to `restored-by-hand` so the next
+  real run recomputes rather than trusting the cache.
+- Background jobs are fire-and-forget in a single process. A server restart
+  mid-run leaves a job on `running` forever.
+- `tests/test_stage1.py` writes into the real `data/jobs/test_*` rather than a
+  tmp dir, so two concurrent pytest runs collide. The API tests are isolated
+  (`EVERGREEN_DB`); stage 1 is not.
+- Steps are stored as JSON inside a version row, so there is no way to query
+  across documents ("every SOP that mentions the Submit button"). Fine at MVP
+  scale, wrong at real scale.
 
 ## Diff engine findings
 
@@ -216,3 +240,49 @@ python -m pytest tests/ -q
 - **The LIS tie-break matters.** Equal-length subsequences exist and the choice
   decides which step is accused of moving. Weighted by match confidence, so
   the pairs we are surest about stay anchored. Deterministic across runs.
+
+- **One bug, found four times: a change signal used as evidence of identity.**
+  Each instance had the same shape — the harder a step changed, the less likely
+  it was recognised as the same step — and each was fixed by separating what
+  *matches* a step from what *changed* about it.
+
+  1. `ui_element.label` at weight 0.20 (already noted above). Now 0.05.
+  2. `expected_result` fed the embedding via `similarity_text`. It describes a
+     step's *consequence*, which changes when the workflow changes AROUND the
+     step. Inserting a 2FA screen rewrote sign-in's expected result and dropped
+     that pair to 0.500 against a 0.62 threshold. Measured: with it, correct
+     pairs bottomed at 0.500 and wrong pairs reached 0.508 — **overlapping**,
+     so no threshold works. Without it: 0.744 vs 0.395, a 0.349 margin.
+  3. The LLM judge was shown the full `diff_payload`. Given both a renamed
+     label and a changed `expected_result`, it ruled "Enter expense details /
+     Save" and "Enter expense details / Submit" *different steps* — the demo's
+     headline case, regressed to remove+add. `_judgeable` now withholds
+     `expected_result`; the judge then names the rename in its own words.
+  4. A human's own edit counted against them: heavier editing meant lower
+     similarity, so regeneration was most likely to discard the most
+     carefully-written steps. `Step.identity_view` judges identity on
+     model-written text on both sides, using `StepMeta.generated_values`.
+
+- **Escalation must reach below `match_threshold`.** The ambiguous band's floor
+  *was* the match threshold, so a pair scoring under it was never adjudicated —
+  meaning the pairs one step away from being reported as remove+add were the
+  only ones guaranteed no judge. `diff.escalate_floor` (0.40) fixes it.
+
+- **An abstaining field must not score zero.** When `identity_view` suppresses
+  an edited field, its fixed weight became dead loss and dragged a correct pair
+  to 0.599 against 0.62 — the edit was neutralised, then punished anyway.
+  Lexical weights now renormalise over comparable fields only.
+
+- **Two judges, not one.** Identity ("same step?") and prose ("same meaning?")
+  are different questions: a step can be the same step and still have changed,
+  or be reworded and unchanged. One similarity number cannot express both. The
+  prose judge is batched into a single call for the whole document and settles
+  the `field_rewrite_threshold` overlap. A judged diff costs ~$0.0016.
+
+## Verified end to end
+
+`demo_v1 → demo_v2` matches ground truth on both the offline and judged paths:
+2 unchanged, 3 modified, 1 added, 1 removed, 1 also moved — the `Save → Submit`
+rename reported as one modified step, not remove+add. The same flow through the
+API preserves a hand edit across regeneration, and rejecting a change restores
+the previous text.

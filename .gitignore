@@ -8,3 +8,7 @@ server/generated/
 tmp/
 dist/
 .next/
+
+# Vite build output
+client/dist/
+*.tsbuildinfo

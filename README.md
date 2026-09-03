@@ -27,11 +27,66 @@ I Built this to explore the same problem space Clueso works on, end to end
 <img width="776" height="660" alt="image" src="https://github.com/user-attachments/assets/23b9d5a9-ff1a-4293-8a5d-0f1edfec51b0" />
 
 
+## Running it
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r server/requirements.txt
+
+cd server
+python -m app.cli new --video ~/recording.mp4   # stage 1, no API key, no spend
+python -m app.cli run <job_id> --save           # generate the SOP, store as v1
+python -m app.cli diff <job_v1> <job_v2> --save # what changed. This is the point.
+
+python -m uvicorn app.main:app --reload --port 8000
+cd ../client && npm install && npm run dev      # http://localhost:5173
+```
+
+One key in `.env` at the repo root — `ANTHROPIC_API_KEY` or `GEMINI_API_KEY`,
+matching `llm.provider` in `config.yaml`. Without one, `llm.offline: auto` runs
+a deterministic placeholder path so the diff, editor and exports are all still
+demoable at zero cost.
+
+## What it costs
+
+Images are ~88% of the spend, so the per-image token rate dominates. Per
+5-minute video: **$0.137** on Anthropic, **$0.014** on Gemini Flash. A judged
+diff adds ~$0.0016. Video decoding, frame sampling, change detection,
+transcription and the first two similarity tiers are all local and free.
+
+`python -m app.cli estimate-cost --minutes 5` predicts spend without a key.
+
+## The interesting part
+
+The diff engine is the product, and most of its design came from measurements
+that contradicted the obvious approach:
+
+- **Fixed similarity thresholds do not generalise.** The frame-to-frame noise
+  floor is a property of the recording, not a constant. Change detection is
+  adaptive (rolling median + MAD).
+- **Neither SSIM nor pHash can identify a screen.** Two *different* screens
+  sharing a UI template scored SSIM 0.979 / pHash 2 against a true duplicate's
+  0.992 / 0. Comparing "ink" masks instead separates them 0.990 vs 0.756.
+- **Never use a change signal as evidence of identity.** The same bug appeared
+  four times: weighting `ui_element.label`, feeding `expected_result` to the
+  embedder, showing it to the LLM judge, and letting a user's own edit count
+  against them. Each had the shape *the harder a step changed, the less likely
+  it was recognised as the same step* — so a renamed button got reported as
+  "step removed, new step added", hiding the one thing the reader needed.
+- **Prose similarity cannot be thresholded.** Same-meaning rewordings scored
+  0.550–0.937 and genuinely different pairs 0.106–0.808 — the ranges overlap,
+  so every threshold misclassifies something. Resolved structurally, with an
+  LLM judge for the overlap only.
+
+`CLAUDE.md` records the measurements behind each of these.
+
 ## Known Flaws & Limitations
 
-- Fire-and-forget background jobs - Volatile
+- Fire-and-forget background jobs - Volatile. A restart mid-run leaves a job on `running` forever.
 - Loading-screen/transitional frames can still slip into both frame selection - mitigated in layers, not eliminated
 - Requires the user to re-record the entire video for feature update
+- Steps live as JSON inside a version row, so there is no cross-document query
+- No auth, no multi-tenancy, no deployment - deliberately out of scope
 
 ## What I'd Build Next
 
