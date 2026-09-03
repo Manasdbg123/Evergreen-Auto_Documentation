@@ -107,11 +107,24 @@ class DiffConfig(BaseModel):
     match_threshold: float = 0.62
     identical_threshold: float = 0.94
     ambiguous_band: tuple[float, float] = (0.62, 0.94)
+    #: Escalation starts HERE, not at `match_threshold`. A pair the assignment
+    #: chose but scored below the match threshold is the single most important
+    #: case to adjudicate — it is about to be reported as remove+add — so
+    #: bounding escalation at the match threshold guaranteed that the pairs
+    #: most needing a judge were the only ones that never reached one.
+    escalate_floor: float = 0.40
     use_visual_fallback: bool = True
     field_rewrite_threshold: float = 0.72
+    #: Below this, a prose difference is a real change and is never escalated.
+    #: Between this and `field_rewrite_threshold` the offline score cannot tell
+    #: a rewording from a rewrite, and only those fields reach the judge.
+    field_ambiguous_floor: float = 0.45
     visual_same_screen_iou: float = 0.92
     visual_different_screen_iou: float = 0.55
     max_visual_comparisons: int = 6
+    #: Hard cap on identity adjudications per diff. The prose judge is batched
+    #: into a single call and is not counted against this.
+    max_llm_judgements: int = 8
     reorder_min_similarity: float = 0.66
 
 

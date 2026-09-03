@@ -224,11 +224,18 @@ def preserve_edits(old: Step, new: Step) -> tuple[Step, list[str]]:
     merged.meta.lineage_id = old.meta.lineage_id
     merged.meta.edited_by_human = old.meta.edited_by_human
     merged.meta.edited_fields = list(old.meta.edited_fields)
+    merged.meta.generated_values = dict(old.meta.generated_values)
 
     preserved: list[str] = []
     for field in old.meta.edited_fields:
         if not hasattr(old, field):
             continue
+        # Record what this regeneration produced before discarding it. That
+        # keeps a machine-written value on this side of the comparison for the
+        # *next* regeneration, so a step does not drift out of recognition as
+        # the human's text and the generated text diverge over versions. See
+        # `Step.identity_view`.
+        merged.meta.generated_values[field] = str(getattr(new, field, "") or "")
         setattr(merged, field, getattr(old, field))
         preserved.append(field)
     return merged, preserved
@@ -243,12 +250,20 @@ class DiffEngine:
     """Callable outside the Stage machinery, because the diff compares two
     SOPs rather than two points in one job's pipeline."""
 
-    def __init__(self, cfg: Config, judge=None, visual=None):
+    def __init__(self, cfg: Config, judge=None, visual=None, prose_judge=None):
         self.cfg = cfg
         #: Optional callable(old_step, new_step) -> (score, rationale).
+        #: Decides step IDENTITY — which v1 step pairs with which v2 step.
         self.judge = judge
         #: Optional callable(old_step, new_step) -> (iou, rationale).
         self.visual = visual
+        #: Optional callable(list[{id, field, old, new}]) -> {id: same_meaning}.
+        #: Decides whether a matched pair actually CHANGED. Kept separate from
+        #: `judge` because a step can be the same step and still have changed,
+        #: and can be reworded and still be unchanged — one similarity number
+        #: cannot express both, which is what produced the wrong verdict on the
+        #: real fixtures.
+        self.prose_judge = prose_judge
 
     def run(self, old_sop: SOP, new_sop: SOP) -> tuple[DiffResult, SOP]:
         """Returns the diff and the merged new SOP with edits preserved."""
@@ -295,8 +310,14 @@ class DiffEngine:
 
         pairs = self._adjudicate(pairs, old, new, result)
         matched = [p for p in pairs if p.score >= d.match_threshold]
+        # A pair the aligner proposed and the adjudication rejected becomes an
+        # added + a removed entry. Without carrying the rejection reason across,
+        # the reviewer is told "nothing matched" when in fact something was
+        # considered and ruled out — which is the more useful fact, and the one
+        # they need in order to disagree with it.
+        rejected = [p for p in pairs if p.score < d.match_threshold]
 
-        entries, merged_steps = self._classify(matched, old, new)
+        entries, merged_steps = self._classify(matched, old, new, result, rejected)
         result.entries = entries
         result.summary = _summarise(entries)
 
@@ -304,10 +325,14 @@ class DiffEngine:
         merged_sop.steps = merged_steps
 
         s = result.summary
+        moved = sum(1 for e in result.entries if e.also_reordered)
         print(
             f"[diff] {s.get('unchanged', 0)} unchanged, {s.get('modified', 0)} modified, "
             f"{s.get('added', 0)} added, {s.get('removed', 0)} removed, "
             f"{s.get('reordered', 0)} reordered"
+            # Reported separately because a step that moved AND changed counts
+            # under `modified`, so the reordered tally alone under-reports moves.
+            + (f" ({moved} of which also moved)" if moved else "")
         )
         return result, merged_sop
 
@@ -319,11 +344,19 @@ class DiffEngine:
         Everything outside the ambiguous band is already decided, for free.
         """
         lo, hi = self.cfg.diff.ambiguous_band
-        ambiguous = [p for p in pairs if lo <= p.score < hi]
+        # Escalation reaches BELOW the match threshold on purpose. A pair the
+        # assignment chose but scored under `match_threshold` is one step away
+        # from being reported as remove + add — the failure that hides a rename
+        # rather than reporting it — so it is the most valuable pair to ask
+        # about, not the least. Bounding this at `lo` meant those pairs were
+        # the only ones guaranteed never to be adjudicated.
+        floor = min(self.cfg.diff.escalate_floor, lo)
+        ambiguous = [p for p in pairs if floor <= p.score < hi]
         if not ambiguous:
             return pairs
 
-        print(f"[diff] {len(ambiguous)} of {len(pairs)} pairs are ambiguous ({lo}-{hi})")
+        print(f"[diff] {len(ambiguous)} of {len(pairs)} pairs need adjudication "
+              f"({floor}-{hi})")
 
         for p in ambiguous:
             if self.judge and self.cfg.similarity.use_llm_judge:
@@ -333,7 +366,11 @@ class DiffEngine:
                     result.llm_judgements_used += 1
                     continue
                 except Exception as exc:
-                    print(f"[diff] judge failed ({exc}) — keeping the offline score")
+                    # Includes hitting `diff.max_llm_judgements`. Either way the
+                    # pair keeps its offline score and the diff carries on: a
+                    # blunter verdict is a far better outcome than no diff.
+                    print(f"[diff] judge could not settle this pair ({exc}) "
+                          f"— keeping the offline score")
 
             # Visual fallback: last resort, hard-capped, and only when text
             # genuinely could not decide.
@@ -354,7 +391,7 @@ class DiffEngine:
                     print(f"[diff] visual comparison failed ({exc})")
         return pairs
 
-    def _prose_scores(self, matched_sorted, old, new) -> dict[str, float]:
+    def _prose_scores(self, matched_sorted, old, new, result: DiffResult) -> dict[str, float]:
         """Batch-score every differing prose field across all matched pairs.
 
         One encode call for the whole document rather than one per field.
@@ -362,22 +399,87 @@ class DiffEngine:
         from .similarity import prose_equivalence
 
         keys: list[str] = []
+        fields: list[str] = []
         pairs: list[tuple[str, str]] = []
         for p in matched_sorted:
             merged, _ = preserve_edits(old[p.old_index], new[p.new_index])
             for field, av, bv in field_pairs(old[p.old_index], merged):
                 if field in PROSE_FIELDS and _normalise(av) != _normalise(bv):
                     keys.append(f"{field}\x00{av}\x00{bv}")
+                    fields.append(field)
                     pairs.append((str(av or ""), str(bv or "")))
         if not pairs:
             return {}
-        return dict(zip(keys, prose_equivalence(self.cfg, pairs)))
 
-    def _classify(self, matched: list[Pair], old: list[Step], new: list[Step]):
+        scores = dict(zip(keys, prose_equivalence(self.cfg, pairs)))
+        return self._adjudicate_prose(scores, keys, fields, pairs, result)
+
+    def _adjudicate_prose(
+        self, scores: dict[str, float], keys: list[str], fields: list[str],
+        pairs: list[tuple[str, str]], result: DiffResult,
+    ) -> dict[str, float]:
+        """Ask a reader about the prose the offline score could not settle.
+
+        The band between `field_ambiguous_floor` and `field_rewrite_threshold`
+        is not a tuning failure — it is measured overlap. Same-meaning
+        rewordings scored 0.550-0.937 on the fixtures and genuinely different
+        pairs 0.106-0.808, so no cut through that range is correct and moving
+        the threshold only chooses which error to make.
+
+        Concretely, this is what stops `expected_result` "The Dashboard screen
+        appears." versus "You are redirected to the Dashboard." from reporting
+        the step as modified.
+
+        Everything outside the band keeps its free score. One batched call
+        covers the whole document, so this costs a fraction of a cent.
+        """
+        d = self.cfg.diff
+        if not self.prose_judge:
+            return scores
+
+        ambiguous = [
+            i for i, key in enumerate(keys)
+            if d.field_ambiguous_floor <= scores.get(key, 0.0) < d.field_rewrite_threshold
+        ]
+        if not ambiguous:
+            return scores
+
+        items = [
+            {"id": str(i), "field": fields[i], "old": pairs[i][0], "new": pairs[i][1]}
+            for i in ambiguous
+        ]
+        print(f"[diff] {len(items)} prose field(s) in the ambiguous band "
+              f"({d.field_ambiguous_floor}-{d.field_rewrite_threshold}) "
+              f"— one batched judge call")
+        try:
+            verdicts = self.prose_judge(items)
+        except Exception as exc:
+            print(f"[diff] prose judge failed ({exc}) — keeping the offline scores")
+            return scores
+
+        settled = 0
+        for i in ambiguous:
+            verdict = verdicts.get(str(i))
+            if verdict is None:
+                continue
+            # Snap to a value the threshold cannot argue with, in either
+            # direction. A judged verdict is not blended with the offline
+            # score: they disagree precisely where the offline score is known
+            # to be unreliable.
+            scores[keys[i]] = 1.0 if verdict else 0.0
+            settled += 1
+        result.llm_judgements_used += settled
+        print(f"[diff] judge settled {settled} prose field(s)")
+        return scores
+
+    def _classify(self, matched: list[Pair], old: list[Step], new: list[Step],
+                  result: DiffResult, rejected: list[Pair] | None = None):
         """Assign a status to every step on both sides, and merge edits."""
         d = self.cfg.diff
+        rejected_by_new = {p.new_index: p for p in (rejected or [])}
+        rejected_by_old = {p.old_index: p for p in (rejected or [])}
         matched_sorted = sorted(matched, key=lambda p: p.old_index)
-        prose_scores = self._prose_scores(matched_sorted, old, new)
+        prose_scores = self._prose_scores(matched_sorted, old, new, result)
         in_order = _classify_order(matched_sorted, d.reorder_min_similarity)
 
         entries: list[StepDiff] = []
@@ -424,20 +526,24 @@ class DiffEngine:
         for j, s in enumerate(new):
             if j not in matched_new:
                 merged_by_new[j] = s
+                p = rejected_by_new.get(j)
                 entries.append(StepDiff(
                     status=DiffStatus.added, lineage_id=s.meta.lineage_id,
                     new_step_id=s.step_id, new_order=s.order,
-                    decided_by="assignment",
-                    rationale="no step in the previous version matched above threshold",
+                    similarity=round(p.score, 4) if p else None,
+                    decided_by=p.decided_by if p else "assignment",
+                    rationale=_rejection_rationale(p, old, "previous"),
                 ))
 
         for i, s in enumerate(old):
             if i not in matched_old:
+                p = rejected_by_old.get(i)
                 entries.append(StepDiff(
                     status=DiffStatus.removed, lineage_id=s.meta.lineage_id,
                     old_step_id=s.step_id, old_order=s.order,
-                    decided_by="assignment",
-                    rationale="no step in the new version matched above threshold",
+                    similarity=round(p.score, 4) if p else None,
+                    decided_by=p.decided_by if p else "assignment",
+                    rationale=_rejection_rationale(p, new, "new"),
                 ))
 
         merged_steps = [merged_by_new[j] for j in sorted(merged_by_new)]
@@ -493,6 +599,23 @@ def _classify_order(matched_sorted: list[Pair], min_similarity: float) -> set[in
         i for i, p in enumerate(matched_sorted) if p.score < min_similarity
     }
     return in_order
+
+
+def _rejection_rationale(pair: Pair | None, other: list[Step], side: str) -> str:
+    """Why this step has no counterpart.
+
+    "Nothing matched" and "the closest candidate was considered and ruled out"
+    are different claims, and only the second one lets a reviewer disagree with
+    the engine. When an adjudicator made the call, say so and name the step it
+    compared against.
+    """
+    if pair is None:
+        return f"no step in the {side} version matched above threshold"
+    index = pair.old_index if side == "previous" else pair.new_index
+    closest = other[index].title if 0 <= index < len(other) else "?"
+    detail = f" — {pair.rationale}" if pair.rationale else ""
+    return (f"closest candidate was \"{closest}\" at {pair.score:.3f}, below the "
+            f"match threshold [{pair.decided_by}]{detail}")
 
 
 def _order_rationale(status: DiffStatus, moved: bool, changes: list, old: Step, new: Step) -> str:

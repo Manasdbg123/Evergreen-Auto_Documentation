@@ -119,14 +119,29 @@ diff:
   match_threshold: 0.62
   # Above this, treat as unchanged without further inspection.
   identical_threshold: 0.94
-  # Pairs landing between these two bounds are escalated to the LLM judge.
+  # Pairs landing between these two bounds are uncertain.
   ambiguous_band: [0.62, 0.94]
+  # Escalation to the judge starts here, BELOW match_threshold — deliberately.
+  # A pair the aligner chose but scored under the match threshold is about to
+  # be reported as remove+add, which is the worst failure this product has: it
+  # hides a rename instead of reporting it. Bounding escalation at
+  # match_threshold meant the pairs most in need of a judge were exactly the
+  # ones that could never reach it. Below this floor a pair is not plausibly
+  # the same step and asking would be spending money to be told so.
+  escalate_floor: 0.40
   # Prose fields (title, instruction, expected_result, location_hint) are
   # rewritten from scratch on every regeneration, so wording drifts even when
   # the workflow did not change. Above this similarity a prose difference is
   # treated as a rewording, not a change. Identity fields (ui_element.label
   # and .type) are always compared exactly and never get this tolerance.
   field_rewrite_threshold: 0.72
+  # ...but a single threshold cannot separate the two cases. Measured on the
+  # fixtures, same-meaning rewordings scored 0.550-0.937 and genuinely
+  # different pairs 0.106-0.808 — the bands overlap, so any cut misclassifies
+  # something. Below this floor a difference is unambiguously real and is
+  # never escalated; only the overlap between the two numbers reaches the
+  # judge, in ONE batched call for the whole document.
+  field_ambiguous_floor: 0.45
   # Only consult screenshots when text comparison is still ambiguous.
   use_visual_fallback: true
   # Ink-mask IoU above which two screenshots show the same screen. NOT pHash:
@@ -137,6 +152,10 @@ diff:
   visual_different_screen_iou: 0.55
   # Cap on how many pairs may ever be escalated to a vision call per diff.
   max_visual_comparisons: 6
+  # Cap on identity adjudications (text-only, no images) per diff. Pairs past
+  # the cap keep their offline score rather than failing. The prose judge is a
+  # single batched call and is not counted here.
+  max_llm_judgements: 8
   # A matched pair outside the longest-increasing-subsequence is "reordered".
   # Requires a match at least this strong to claim reorder over remove+add.
   reorder_min_similarity: 0.66

@@ -25,6 +25,7 @@ from .models import new_id
 from .pipeline.base import JobPaths, read_stage
 from .pipeline.detect_changes import DetectChangesStage
 from .pipeline.detect_steps import DetectStepsStage
+from .pipeline.export import ExportStage
 from .pipeline.frames import FramesStage
 from .pipeline.ingest import IngestStage, place_upload
 from .pipeline.llm_stage import LLMStage
@@ -40,6 +41,7 @@ STAGES = {
     "select_candidates": SelectCandidatesStage,
     "detect_steps": DetectStepsStage,
     "structure": StructureStage,
+    "export": ExportStage,
 }
 
 #: Everything that runs without an API key and without spending anything.
@@ -89,17 +91,87 @@ def cmd_stage1(args) -> int:
 
 
 def cmd_run(args) -> int:
-    """The whole pipeline, ingest through structure, for one job."""
+    """The whole pipeline, ingest through export, for one job."""
+    from . import db
+
     cfg = load_config()
-    for name in STAGE1 + LLM_STAGES:
-        _build(name, cfg, args.offline).run(args.job_id, force=args.force)
+    db.create_job(cfg, args.job_id)
+
+    try:
+        for name in STAGE1 + LLM_STAGES + ["export"]:
+            db.set_job_status(cfg, args.job_id, "running", stage=name)
+            _build(name, cfg, args.offline).run(args.job_id, force=args.force)
+    except Exception as exc:
+        db.set_job_status(cfg, args.job_id, "failed", error=str(exc))
+        raise
+    db.set_job_status(cfg, args.job_id, "complete")
 
     job = JobPaths(cfg, args.job_id)
     data = read_stage(job, "structure") or {}
     spent = _spent(job)
     print(f"\n{data.get('count', 0)} steps generated. Actual API spend this job: "
           f"${spent:.4f}")
+
+    # Persisting here is what makes the next recording diffable. A job whose
+    # SOP was never saved has nothing to be the previous version of.
+    if args.document or args.save:
+        sop = _sop_of(cfg, args.job_id)
+        if sop is not None:
+            document_id = args.document or db.create_document(cfg, sop.title)
+            db.attach_job_to_document(cfg, args.job_id, document_id)
+            version = db.save_version(cfg, document_id, sop, job_id=args.job_id)
+            print(f"saved as {document_id} v{version}")
+            print(f"  python -m app.cli diff {args.job_id} <new_job_id>")
+
     print(f"  python -m app.cli show {args.job_id}")
+    return 0
+
+
+def _sop_of(cfg, job_id: str):
+    from .models import SOP
+
+    data = read_stage(JobPaths(cfg, job_id), "structure")
+    if not data or not data.get("sop"):
+        return None
+    return SOP.model_validate(data["sop"])
+
+
+def cmd_diff(args) -> int:
+    """The demo: what changed between two recordings of the same workflow."""
+    from . import db
+    from .pipeline.diff_stage import DiffStage
+
+    cfg = load_config()
+    stage = DiffStage(cfg, old_job_id=args.old_job_id, offline=args.offline)
+    data = stage.run(args.new_job_id, force=args.force)
+
+    summary = data.get("summary") or {}
+    if not summary:
+        print("\nNo differences found.")
+
+    # Store the diff against the document so the review UI can accept or reject
+    # each entry, and so the merged SOP — the one carrying preserved edits —
+    # becomes the new current version.
+    if args.save:
+        from .models import DiffResult, SOP
+
+        old = db.get_job(cfg, args.old_job_id) or {}
+        document_id = old.get("document_id")
+        if not document_id:
+            print("\nThe previous job is not attached to a document — nothing to "
+                  "version against.\nRe-run it with --save to create one:",
+                  file=sys.stderr)
+            print(f"  python -m app.cli run {args.old_job_id} --save",
+                  file=sys.stderr)
+            return 1
+
+        result = DiffResult.model_validate(data["diff"])
+        merged = SOP.model_validate(data["merged_sop"])
+        db.attach_job_to_document(cfg, args.new_job_id, document_id)
+        version = db.save_version(cfg, document_id, merged, source="merged",
+                                  job_id=args.new_job_id)
+        diff_id = db.save_diff(cfg, document_id, result)
+        print(f"\nsaved {document_id} v{version} and diff {diff_id}")
     return 0
 
 
@@ -291,12 +363,27 @@ def main() -> int:
     s1.add_argument("--force", action="store_true")
     s1.set_defaults(func=cmd_stage1)
 
-    r = sub.add_parser("run", help="the whole pipeline: ingest -> structure")
+    r = sub.add_parser("run", help="the whole pipeline: ingest -> export")
     r.add_argument("job_id")
     r.add_argument("--force", action="store_true")
     r.add_argument("--offline", action="store_true",
                    help="skip every API call; emit schema-valid placeholder text")
+    r.add_argument("--save", action="store_true",
+                   help="store the SOP as v1 of a new document, so a later "
+                        "recording can be diffed against it")
+    r.add_argument("--document", default=None,
+                   help="store as the next version of an existing document")
     r.set_defaults(func=cmd_run)
+
+    df = sub.add_parser("diff", help="what changed between two recordings")
+    df.add_argument("old_job_id", help="the job holding the previous version")
+    df.add_argument("new_job_id", help="the job holding the new recording")
+    df.add_argument("--force", action="store_true")
+    df.add_argument("--offline", action="store_true",
+                    help="offline tiers only — no LLM judge")
+    df.add_argument("--save", action="store_true",
+                    help="store the diff and the merged SOP as a new version")
+    df.set_defaults(func=cmd_diff)
 
     for name in STAGES:
         sp = sub.add_parser(name, help=f"run the {name} stage")

@@ -236,3 +236,137 @@ def structure_user_intro(count: int, has_transcript: bool) -> str:
     return (f"{count} confirmed step frames from one workflow, in order. "
             f"{narration}\nReturn exactly {count} steps, one per candidate_id, "
             f"in the same order.")
+
+
+# --------------------------------------------------------------------------
+# Stage 8 — the diff judges
+# --------------------------------------------------------------------------
+#
+# Two judges, because the diff asks two different questions and conflating
+# them is what produced the wrong verdict this code exists to fix.
+#
+#   identity   "are these the same step in the workflow?"  -> which steps pair
+#   prose      "do these two sentences say the same thing?" -> whether a paired
+#                                                              step changed
+#
+# A step can be the same step AND have changed; a step can be reworded AND be
+# unchanged. Answering both with one similarity number cannot express that.
+
+
+def judge_identity_system() -> str:
+    return """You compare two steps from two versions of the same written procedure.
+
+The second version was generated from a fresh screen recording made after the
+software's UI changed. Every step was rewritten from scratch, so wording
+differs everywhere, including in steps where nothing actually happened.
+
+Your only question: do these two entries describe THE SAME STEP of the
+workflow — the same point in the procedure, the same thing the user is doing?
+
+Answer "same" when the step is the same even though it changed:
+- the control was renamed ("Save" became "Submit")
+- the control moved, or changed type (a link became a button)
+- the instruction was reworded, expanded, or shortened
+- the expected result is described differently
+
+Answer "different" when these are genuinely different points in the workflow,
+even if they read similarly:
+- two different fields of the same form
+- two different screens that share a layout
+- one step removed and an unrelated one added in its place
+
+This distinction is the whole product. A renamed button reported as
+"step removed, new step added" is the single worst failure mode here: it hides
+the rename, which is exactly what the reader needed to know."""
+
+
+def judge_identity_tool_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["verdict", "confidence", "reason"],
+        "properties": {
+            "verdict": {"type": "string", "enum": ["same", "different"]},
+            "confidence": {
+                "type": "number",
+                "description": "0.0 to 1.0. How sure you are of the verdict.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "One short clause naming the deciding evidence.",
+            },
+        },
+    }
+
+
+def judge_identity_user(old: dict[str, Any], new: dict[str, Any]) -> str:
+    import json
+
+    return (
+        "VERSION 1 STEP:\n"
+        + json.dumps(old, indent=2)
+        + "\n\nVERSION 2 STEP:\n"
+        + json.dumps(new, indent=2)
+        + "\n\nSame step of the workflow, or different steps?"
+    )
+
+
+def judge_prose_system() -> str:
+    return """You compare pairs of sentences from two versions of the same procedure.
+
+Version 2 was written from scratch, so ordinary rewording is expected
+everywhere and means nothing on its own. For each pair, decide whether the two
+sentences convey THE SAME FACT about the software.
+
+Same meaning — the wording changed, the fact did not:
+  "The Dashboard screen appears."  /  "You are redirected to the Dashboard."
+  "Click Save to continue."        /  "Press Save."
+  "Enter your email address."      /  "Type the email you registered with."
+
+Different meaning — something about the software actually changed:
+  "The Dashboard screen appears."  /  "A verification prompt appears."
+  "Click Save."                    /  "Click Submit."
+  "Enter your email address."      /  "Enter your employee ID."
+
+Judge only what the sentence asserts. Extra detail on one side is still the
+same meaning if it does not contradict the other side. Named UI text is an
+assertion: if the two sentences name different controls, screens or fields,
+that is a different meaning even when the sentence structure is identical."""
+
+
+def judge_prose_tool_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["verdicts"],
+        "properties": {
+            "verdicts": {
+                "type": "array",
+                "description": "One entry per pair, in the order given.",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["id", "same_meaning", "reason"],
+                    "properties": {
+                        "id": {"type": "string"},
+                        "same_meaning": {"type": "boolean"},
+                        "reason": {"type": "string",
+                                   "description": "One short clause."},
+                    },
+                },
+            }
+        },
+    }
+
+
+def judge_prose_user(items: list[dict[str, str]]) -> str:
+    lines = [f"{len(items)} sentence pairs. Return exactly {len(items)} verdicts, "
+             f"one per id.\n"]
+    for item in items:
+        lines.append(
+            f"\nid: {item['id']}\n"
+            f"field: {item['field']}\n"
+            f"v1: {item['old']!r}\n"
+            f"v2: {item['new']!r}"
+        )
+    return "\n".join(lines)

@@ -63,25 +63,49 @@ def lexical_similarity(a: Step, b: Step) -> float:
     of control). The label earns a small positive contribution when it matches
     but costs almost nothing when it does not — and `field_changes` still
     reports the label change in full.
+
+    Weights are renormalised over the fields that can actually be compared.
+    A field suppressed by `identity_view` (a human edit with no generated
+    baseline) is unknown, not mismatched, and scoring it as zero would charge
+    the step full weight for evidence nobody has. Measured on the fixture, an
+    edited instruction dragged a correct pair to 0.599 against a 0.62
+    threshold purely through that dead weight — the edit was neutralised, then
+    punished anyway.
     """
-    title = _jaccard(tokens(a.title), tokens(b.title))
-    instruction = _jaccard(tokens(a.instruction), tokens(b.instruction))
-    expected = _jaccard(tokens(a.expected_result), tokens(b.expected_result))
+    # Both tiers read the same view, so a hand edit cannot be neutralised in
+    # the embedding tier and still count against the step lexically. See
+    # `Step.identity_view`.
+    va, vb = a.identity_view(), b.identity_view()
 
-    la, lb = a.ui_element.label.strip().lower(), b.ui_element.label.strip().lower()
-    if la and lb:
-        label = 1.0 if la == lb else _jaccard(tokens(la), tokens(lb)) * 0.5
-    else:
-        label = 0.0
-    kind = 1.0 if a.ui_element.type == b.ui_element.type else 0.0
+    # (weight, score) per component; None means "cannot compare — abstain".
+    components: list[tuple[float, float | None]] = [
+        (0.38, _compare(va["title"], vb["title"])),
+        (0.37, _compare(va["instruction"], vb["instruction"])),
+        (0.05, _compare_label(va["label"], vb["label"])),
+        (0.05, 1.0 if a.ui_element.type == b.ui_element.type else 0.0),
+        (0.15, _compare(a.expected_result, b.expected_result)),
+    ]
 
-    return (
-        0.38 * title
-        + 0.37 * instruction
-        + 0.05 * label
-        + 0.05 * kind
-        + 0.15 * expected
-    )
+    total = sum(w for w, s in components if s is not None)
+    if not total:
+        return 0.0
+    return sum(w * s for w, s in components if s is not None) / total
+
+
+def _compare(a: str | None, b: str | None) -> float | None:
+    """Token overlap, or None when either side is unknown."""
+    if a is None or b is None:
+        return None
+    return _jaccard(tokens(a), tokens(b))
+
+
+def _compare_label(a: str | None, b: str | None) -> float | None:
+    if a is None or b is None:
+        return None
+    la, lb = a.strip().lower(), b.strip().lower()
+    if not la or not lb:
+        return 0.0
+    return 1.0 if la == lb else _jaccard(tokens(la), tokens(lb)) * 0.5
 
 
 def _jaccard(a: list[str], b: list[str]) -> float:
