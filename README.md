@@ -34,6 +34,21 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r server/requirements.txt
 
 cd server
+python -m app.cli doctor    # check ffmpeg, deps, key, storage — before uploading
+python -m app.cli demo      # build two fixture recordings and diff them
+```
+
+`demo` is the whole product from nothing: it generates two synthetic
+recordings of the same workflow — the second after a UI change that renames
+Save to Submit, inserts a 2FA screen, drops the attachment step and moves
+review ahead of the form — runs both through the pipeline, and checks the diff
+against known ground truth. No recording of your own, ~$0.03 on Gemini Flash.
+It is also what creates `demo_v1`/`demo_v2`, without which `tests/test_api.py`
+skips.
+
+Then, with your own recording:
+
+```bash
 python -m app.cli new --video ~/recording.mp4   # stage 1, no API key, no spend
 python -m app.cli run <job_id> --save           # generate the SOP, store as v1
 python -m app.cli diff <job_v1> <job_v2> --save # what changed. This is the point.
@@ -41,6 +56,8 @@ python -m app.cli diff <job_v1> <job_v2> --save # what changed. This is the poin
 python -m uvicorn app.main:app --reload --port 8000
 cd ../client && npm install && npm run dev      # http://localhost:5173
 ```
+
+`python -m pytest tests/ -q` runs 72 tests and needs no API key.
 
 One key in `.env` at the repo root — `ANTHROPIC_API_KEY` or `GEMINI_API_KEY`,
 matching `llm.provider` in `config.yaml`. Without one, `llm.offline: auto` runs
@@ -82,7 +99,10 @@ that contradicted the obvious approach:
 
 ## Known Flaws & Limitations
 
-- Fire-and-forget background jobs - Volatile. A restart mid-run leaves a job on `running` forever.
+- Background jobs are fire-and-forget in a single process. A restart mid-run
+  loses the work; the job is now marked `failed` with a "re-run it" message at
+  the next startup rather than left on `running` forever, but there is no queue
+  and no retry.
 - Loading-screen/transitional frames can still slip into both frame selection - mitigated in layers, not eliminated
 - Requires the user to re-record the entire video for feature update
 - Steps live as JSON inside a version row, so there is no cross-document query

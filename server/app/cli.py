@@ -341,6 +341,205 @@ def cmd_config(args) -> int:
     return 0
 
 
+#: What the fixture pair is built to contain. `make_test_video.V1/V2` encode a
+#: renamed button (Save -> Submit), a 2FA screen inserted after login, the
+#: attachment step dropped, and review/confirm moved ahead of the form.
+DEMO_GROUND_TRUTH = {"unchanged": 2, "modified": 3, "added": 1, "removed": 1}
+
+
+def cmd_doctor(args) -> int:
+    """Check this machine can run the pipeline, before anything is uploaded.
+
+    Every failure here used to surface halfway through a run, as a traceback
+    from whichever stage happened to need the missing piece first.
+    """
+    import importlib.util
+    import shutil
+
+    cfg = load_config()
+    problems = 0
+
+    def report(ok: bool, label: str, detail: str = "", fatal: bool = True) -> None:
+        nonlocal problems
+        mark = "ok  " if ok else ("FAIL" if fatal else "warn")
+        print(f"  [{mark}] {label}" + (f" — {detail}" if detail else ""))
+        if not ok and fatal:
+            problems += 1
+
+    print("\nEvergreen preflight\n")
+
+    print(" environment")
+    report(sys.version_info >= (3, 10), "python >= 3.10",
+           f"running {sys.version.split()[0]}")
+
+    from .config import resolve_ffmpeg
+    try:
+        ffmpeg = resolve_ffmpeg(cfg)
+        report(bool(ffmpeg), "ffmpeg", str(ffmpeg))
+    except Exception as exc:
+        report(False, "ffmpeg", f"{type(exc).__name__}: {exc}")
+
+    for mod, why in (("cv2", "video decode and SSIM"),
+                     ("imagehash", "perceptual hashing"),
+                     ("skimage", "structural similarity"),
+                     ("scipy", "optimal step assignment")):
+        report(importlib.util.find_spec(mod) is not None, f"{mod}", why)
+
+    for mod, why in (("faster_whisper", "transcription (optional; "
+                                        "the vision-only path is primary)"),
+                     ("sentence_transformers", "similarity tier 2 (optional; "
+                                               "falls back to lexical)")):
+        report(importlib.util.find_spec(mod) is not None, mod, why, fatal=False)
+
+    print("\n storage")
+    try:
+        cfg.jobs_root.mkdir(parents=True, exist_ok=True)
+        probe = cfg.jobs_root / ".write_probe"
+        probe.write_text("ok")
+        probe.unlink()
+        report(True, "data directory writable", str(cfg.data_root))
+    except Exception as exc:
+        report(False, "data directory writable", f"{type(exc).__name__}: {exc}")
+    report(True, "database", str(cfg.db_file))
+
+    print("\n model provider")
+    from .config import provider_key
+    key = provider_key(cfg)
+    report(True, "provider", f"{cfg.llm.provider} (llm.provider in config.yaml)")
+    if key:
+        report(True, f"{cfg.key_env_var} present", f"...{key[-4:]}")
+    else:
+        report(cfg.llm.offline != "never", f"{cfg.key_env_var} not set",
+               "llm.offline is 'never', so a run will fail"
+               if cfg.llm.offline == "never"
+               else f"llm.offline is '{cfg.llm.offline}', so runs fall back to "
+                    "the placeholder path at zero cost",
+               fatal=cfg.llm.offline == "never")
+
+    print("\n demo fixtures")
+    have = [j for j in ("demo_v1", "demo_v2")
+            if read_stage(JobPaths(cfg, j), "structure") is not None]
+    report(len(have) == 2, "demo_v1 and demo_v2 generated",
+           "present" if len(have) == 2
+           else "run `python -m app.cli demo` to build them "
+                "(no API key needed; test_api.py skips without them)",
+           fatal=False)
+
+    if problems:
+        print(f"\n{problems} blocking problem(s).\n")
+        return 1
+    print("\nAll clear.\n")
+    return 0
+
+
+def cmd_demo(args) -> int:
+    """Build the fixture recordings and run the whole product over them.
+
+    The reproducible proof, from nothing: it generates two synthetic screen
+    recordings of the same workflow — the second after a UI change that renames
+    Save to Submit, inserts a 2FA screen, drops the attachment step and moves
+    review ahead of the form — runs both through the pipeline, and diffs them
+    against known ground truth. No recording of your own and no setup beyond a
+    key. On a clean checkout it is also what creates `demo_v1`/`demo_v2`,
+    without which `tests/test_api.py` skips.
+
+    `--offline` removes the API dependency but cannot demonstrate the diff; see
+    the note it prints.
+    """
+    import tempfile
+
+    from . import db
+    from .pipeline.diff_stage import DiffStage
+    from .pipeline.runner import run_pipeline
+
+    cfg = load_config()
+    v1_id, v2_id = f"{args.prefix}_v1", f"{args.prefix}_v2"
+
+    # Guard rail, and not a theoretical one. `--offline` changes a stage's cache
+    # fingerprint, so running this over jobs whose SOPs were generated for real
+    # replaces that prose with placeholder text. That has already cost one
+    # hand-written demo.
+    existing = [j for j in (v1_id, v2_id)
+                if read_stage(JobPaths(cfg, j), "structure") is not None]
+    if existing and not args.force:
+        print(f"{' and '.join(existing)} already have generated SOPs.\n"
+              f"Re-running would overwrite them with placeholder text.\n\n"
+              f"  python -m app.cli demo --force        # overwrite anyway\n"
+              f"  python -m app.cli demo --prefix scratch   # leave them alone\n"
+              f"  python -m app.cli diff {v1_id} {v2_id}   # just show the diff",
+              file=sys.stderr)
+        return 1
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    import make_test_video as fixture  # noqa: E402
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        print("\n[1/4] building fixture recordings")
+        for job_id, screens in ((v1_id, fixture.V1), (v2_id, fixture.V2)):
+            video = tmp_dir / f"{job_id}.mp4"
+            fixture.build(screens, video)
+            place_upload(cfg, job_id, video, video.name)
+
+        label = "offline, no API calls" if args.offline else f"via {cfg.llm.provider}"
+        print(f"\n[2/4] first recording -> SOP ({label})")
+        document_id = args.document or db.create_document(
+            cfg, title="Submit an expense request")
+        run_pipeline(cfg, v1_id, offline=args.offline, force=True,
+                     document_id=document_id)
+
+        print("\n[3/4] second recording, after the UI change -> SOP")
+        run_pipeline(cfg, v2_id, offline=args.offline, force=True)
+
+    print("\n[4/4] diff")
+    data = DiffStage(cfg, old_job_id=v1_id, offline=args.offline).run(
+        v2_id, force=True)
+    summary = data.get("summary") or {}
+
+    from .models import DiffResult, SOP
+    result = DiffResult.model_validate(data["diff"])
+    merged = SOP.model_validate(data["merged_sop"])
+    db.attach_job_to_document(cfg, v2_id, document_id)
+    version = db.save_version(cfg, document_id, merged, source="merged",
+                              job_id=v2_id)
+    db.save_diff(cfg, document_id, result)
+
+    print(f"\n  document {document_id} is now at v{version}\n")
+    width = max(len(k) for k in DEMO_GROUND_TRUTH)
+    mismatched = []
+    for key, expected in DEMO_GROUND_TRUTH.items():
+        actual = int(summary.get(key, 0) or 0)
+        flag = "" if actual == expected else f"   <- expected {expected}"
+        if actual != expected:
+            mismatched.append(key)
+        print(f"  {key:<{width}}  {actual}{flag}")
+    print(f"\n  {int(summary.get('reordered', 0) or 0)} step(s) also reported "
+          f"as moved")
+
+    if args.offline:
+        # Not a failure, and worth spelling out rather than leaving the reader
+        # to conclude the diff engine is broken. The offline path never invents
+        # a ui_element.label or reads screen text, so both SOPs come out as the
+        # same placeholder prose and there is genuinely nothing to diff. The
+        # diff engine needs a model to have read the screens first.
+        print("\n  --offline generates placeholder step text without reading the\n"
+              "  screenshots, so both SOPs are identical and the diff correctly\n"
+              "  reports no changes. To see the real diff, run without --offline\n"
+              f"  (about $0.03 total on {cfg.llm.provider}).\n")
+        return 0
+
+    print(f"\n  python -m app.cli show {v2_id}")
+    print(f"  python -m app.cli contact-sheet {v2_id}")
+    print(f"  python -m app.cli inspect {v2_id}\n")
+
+    if mismatched:
+        print(f"Diff does not match the fixture's ground truth "
+              f"({', '.join(mismatched)}).\n", file=sys.stderr)
+        return 1
+    print("  Matches the fixture's ground truth.\n")
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="app.cli", description="Evergreen pipeline driver")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -407,6 +606,22 @@ def main() -> int:
 
     c = sub.add_parser("config", help="print the resolved config")
     c.set_defaults(func=cmd_config)
+
+    dr = sub.add_parser("doctor", help="check this machine can run the pipeline")
+    dr.set_defaults(func=cmd_doctor)
+
+    dm = sub.add_parser("demo", help="build fixture recordings and run the whole "
+                                     "product over them — no API key needed")
+    dm.add_argument("--prefix", default="demo",
+                    help="job id prefix; default 'demo' creates demo_v1/demo_v2")
+    dm.add_argument("--document", default=None,
+                    help="attach to an existing document instead of a new one")
+    dm.add_argument("--force", action="store_true",
+                    help="overwrite existing SOPs for these job ids")
+    dm.add_argument("--offline", action="store_true",
+                    help="no API calls at all — proves the pipeline runs, but "
+                         "the diff will be empty because no screen text is read")
+    dm.set_defaults(func=cmd_demo)
 
     args = p.parse_args()
     return args.func(args)

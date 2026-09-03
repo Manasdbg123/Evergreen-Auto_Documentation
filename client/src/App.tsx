@@ -2,7 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 
 import { api } from "./api";
 import { DiffReview } from "./components/DiffReview";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { SopEditor } from "./components/SopEditor";
+import { ThemeToggle } from "./components/ThemeToggle";
 import { Upload } from "./components/Upload";
 import type { DiffResult, DocumentSummary, Sop, VersionInfo } from "./types";
 
@@ -86,7 +88,8 @@ export default function App() {
           Screen recordings in, structured SOPs out — with a reviewable diff when
           the workflow is recorded again.
         </span>
-        {provider && <span className="hint">model: {provider}</span>}
+        {provider && <span className="provider">{provider}</span>}
+        <ThemeToggle />
       </header>
 
       {error && <p className="error">{error}</p>}
@@ -142,20 +145,33 @@ export default function App() {
                 />
               </div>
 
-              {diff && (
-                <DiffReview
-                  diffId={diff.id}
-                  diff={diff.result}
-                  onReviewed={() => openDocument(documentId)}
-                />
+              {/* A diff describes one step forward in the history, so it does
+                  not belong on a version it predates. Viewing v1 while the
+                  latest diff runs v1 -> v3 was showing changes that have not
+                  happened yet from that version's point of view. */}
+              {diff && sop.version >= diff.result.new_version && (
+                <ErrorBoundary resetKey={diff.id}>
+                  <DiffReview
+                    diffId={diff.id}
+                    diff={diff.result}
+                    onReviewed={() => openDocument(documentId)}
+                  />
+                </ErrorBoundary>
               )}
 
-              <SopEditor
-                documentId={documentId}
-                sop={sop}
-                diffEntries={diff?.result.entries}
-                onSaved={() => openDocument(documentId)}
-              />
+              {/* Keyed on the version so switching versions remounts the
+                  editor. A single editor reused across versions would carry
+                  the previous version's undo history, and undoing into it
+                  then saving would write the wrong text back. */}
+              <ErrorBoundary resetKey={`${sop.sop_id}:${sop.version}`}>
+                <SopEditor
+                  key={`${sop.sop_id}:${sop.version}`}
+                  documentId={documentId}
+                  sop={sop}
+                  diffEntries={diff?.result.entries}
+                  onSaved={() => openDocument(documentId)}
+                />
+              </ErrorBoundary>
             </>
           )}
         </main>

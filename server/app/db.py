@@ -141,6 +141,42 @@ def set_job_status(cfg: Config, job_id: str, status: str, *,
         )
 
 
+#: Statuses that only a live in-process pipeline can legitimately be sitting in.
+LIVE_STATUSES = ("queued", "running")
+
+INTERRUPTED_ERROR = (
+    "Interrupted — the server stopped while this job was running. "
+    "Re-run it: python -m app.cli run <job_id> --force"
+)
+
+
+def reconcile_interrupted_jobs(cfg: Config) -> list[str]:
+    """Fail any job left mid-flight by a previous process, and say which.
+
+    Background jobs run in-process, so at startup there is by definition no
+    pipeline still working on anything. Any row still marked `running` or
+    `queued` is therefore a job whose process died — a server restart, a
+    crash, a Ctrl-C. Left alone those rows stay `running` forever, and the UI
+    shows a spinner that will never resolve.
+
+    Called from the API's lifespan startup. Deliberately *not* called from the
+    CLI, which shares this database: a CLI command must not fail a job that
+    the server is legitimately running right now.
+    """
+    with connect(cfg) as conn:
+        rows = conn.execute(
+            "SELECT job_id FROM jobs WHERE status IN (?, ?)", LIVE_STATUSES
+        ).fetchall()
+        stranded = [r["job_id"] for r in rows]
+        if stranded:
+            conn.execute(
+                "UPDATE jobs SET status = 'failed', error = ?, updated_at = ? "
+                "WHERE status IN (?, ?)",
+                (INTERRUPTED_ERROR, time.time(), *LIVE_STATUSES),
+            )
+    return stranded
+
+
 def get_job(cfg: Config, job_id: str) -> dict[str, Any] | None:
     with connect(cfg) as conn:
         row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
@@ -284,7 +320,8 @@ def list_versions(cfg: Config, document_id: str) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
-def latest_sop_for_job(cfg: Config, job_id: str) -> SOP | None:
+def latest_sop_for_job(cfg: Config, job_id: str, *,
+                       before_job: str | None = None) -> SOP | None:
     """The most recent stored SOP produced from, or edited after, this job.
 
     This is the function that makes edit preservation real rather than
@@ -292,6 +329,15 @@ def latest_sop_for_job(cfg: Config, job_id: str) -> SOP | None:
     not what the model first generated. If a job has a document, the document's
     latest version wins — that version may include hand edits made long after
     the recording was processed.
+
+    `before_job` excludes everything from the point that job first contributed
+    a version. The diff needs it for the OLD side, and without it the headline
+    demo silently stopped working after its first save: `diff --save` attaches
+    the NEW job to the same document and stores the merged result as the latest
+    version, so on the next run both job ids resolved to that same merged SOP
+    and the diff reported every step unchanged. The old side must be the
+    document as it stood *before* the new recording was merged in — otherwise
+    the diff is comparing the new SOP against itself.
     """
     with connect(cfg) as conn:
         row = conn.execute(
@@ -300,11 +346,31 @@ def latest_sop_for_job(cfg: Config, job_id: str) -> SOP | None:
         document_id = row["document_id"] if row else None
 
         if document_id:
-            latest = conn.execute(
-                "SELECT sop_json FROM versions WHERE document_id = ? "
-                "ORDER BY version DESC LIMIT 1",
-                (document_id,),
-            ).fetchone()
+            # Versions are append-only, so "before this job contributed" is
+            # simply every version numbered below its first one. That also
+            # excludes any hand edit made *after* the merge, which belongs to
+            # the new side of the history rather than the old.
+            cutoff = None
+            if before_job:
+                got = conn.execute(
+                    "SELECT MIN(version) AS v FROM versions "
+                    "WHERE document_id = ? AND job_id = ?",
+                    (document_id, before_job),
+                ).fetchone()
+                cutoff = got["v"] if got else None
+
+            if cutoff is None:
+                latest = conn.execute(
+                    "SELECT sop_json FROM versions WHERE document_id = ? "
+                    "ORDER BY version DESC LIMIT 1",
+                    (document_id,),
+                ).fetchone()
+            else:
+                latest = conn.execute(
+                    "SELECT sop_json FROM versions WHERE document_id = ? "
+                    "AND version < ? ORDER BY version DESC LIMIT 1",
+                    (document_id, cutoff),
+                ).fetchone()
             if latest:
                 return SOP.model_validate_json(latest["sop_json"])
 

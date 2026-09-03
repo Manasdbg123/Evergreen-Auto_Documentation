@@ -121,6 +121,8 @@ design choice will make the diff engine harder later.
 
 ```bash
 source .venv/bin/activate && cd server
+python -m app.cli doctor                      # preflight: ffmpeg, deps, key, storage
+python -m app.cli demo                        # fixtures → SOPs → diff vs ground truth
 python -m app.cli new --video ~/rec.mp4       # ingest → candidates
 python -m app.cli run <job_id> [--offline]    # whole pipeline → SOP → export
 python -m app.cli run <job_id> --save         # ...and store it as a document v1
@@ -130,7 +132,7 @@ python -m app.cli contact-sheet <job_id>      # visual check of chosen frames
 python -m app.cli inspect <job_id>            # what ran, what it found
 python -m app.cli <stage> <job_id> --force    # re-run one stage
 python -m app.cli estimate-cost --minutes 5   # predict spend, no key needed
-python -m pytest tests/ -q                    # 64 tests, no API key needed
+python -m pytest tests/ -q                    # 72 tests, no API key needed
 
 # Both halves, as the brief requires:
 python -m uvicorn app.main:app --reload --port 8000
@@ -166,14 +168,42 @@ throwaway job id when exercising the offline path.
 - The pre-existing TypeScript/Next.js implementation is parked in `server/src`,
   snapshotted at commit `0c3dbf1`. The old Next.js `client/` was replaced; it
   remains in git history at that commit.
-- `EVERGREEN_DB` overrides `paths.db_path`, so tests and second instances do
-  not write into the demo database.
+- `EVERGREEN_DB` overrides `paths.db_path` and `EVERGREEN_DATA_DIR` overrides
+  `paths.data_dir`, so tests and second instances do not write into the demo
+  database or the demo job directory. Setting only the data dir moves the
+  database with it; setting `EVERGREEN_DB` explicitly still wins. `test_api.py`
+  isolates the database, `test_stage1.py` isolates the data dir.
+- `cli demo` builds both fixture recordings and runs the whole product over
+  them, checking the result against `DEMO_GROUND_TRUTH`. It refuses to run when
+  `demo_v1`/`demo_v2` already hold generated SOPs, because `--offline` would
+  overwrite them with placeholder text — the mistake that cost the original
+  `demo_v1` prose. `--prefix scratch` for a throwaway run.
+- `cli demo --offline` completes but reports **no changes**, correctly: the
+  offline path never reads screen text, so both SOPs are the same placeholder
+  prose and there is genuinely nothing to diff. The command says so rather than
+  leaving the reader to conclude the diff engine is broken. Demonstrating the
+  diff requires a model to have read the screens.
 
 ## Measured findings that drove design decisions
 
 - **Fixed SSIM thresholds do not generalise.** On a clean fixture the noise floor
   sat at dissimilarity 0.0135 while real screen changes reached only 0.038. Change
   detection is adaptive: rolling median + MAD, `k=3.5`.
+- **Never seek a screen recording; decode it.** Frame sampling used to seek to
+  each sample time with `CAP_PROP_POS_MSEC`. That works on a constant-frame-rate
+  mp4 and fails on the variable-frame-rate WebM that every GNOME/Wayland screen
+  recorder produces: the container declares `r_frame_rate=1000/1` and
+  `avg_frame_rate=0/0`, OpenCV's second seek returns false, the loop exits, and
+  **a 43-second recording yielded 3 frames instead of 87** — one step in the
+  SOP, no error anywhere. Measured on a real LeetCode sign-in capture. Fixed by
+  reading straight through and selecting on timestamp (`_FrameClock`), which
+  costs a full decode and is correct for every container. The clock trusts the
+  container's per-frame PTS first, a declared rate only when it is between 1 and
+  240fps, and otherwise counts frames with `grab()` and divides by the known
+  duration (here: 1234 frames / 43.1s = 28.6fps). `frames` now also warns when
+  the sample count comes in under half of `duration × sample_fps`, because
+  undersampling is invisible downstream — every later stage happily produces a
+  plausible, wrong SOP from a short timeline.
 - **SSIM and pHash must be OR'd, not AND'd.** AND missed 2 of 5 real transitions.
 - **Neither SSIM nor pHash can identify a screen.** Two *different* screens sharing
   a UI template scored SSIM 0.979 / pHash 2, versus a true duplicate at 0.992 / 0.
@@ -211,11 +241,10 @@ throwaway job id when exercising the offline path.
   timestamps, phashes, screenshots) is the original; the prose is a faithful
   transcription, and `_fingerprint` is set to `restored-by-hand` so the next
   real run recomputes rather than trusting the cache.
-- Background jobs are fire-and-forget in a single process. A server restart
-  mid-run leaves a job on `running` forever.
-- `tests/test_stage1.py` writes into the real `data/jobs/test_*` rather than a
-  tmp dir, so two concurrent pytest runs collide. The API tests are isolated
-  (`EVERGREEN_DB`); stage 1 is not.
+- Background jobs are fire-and-forget in a single process, so a restart mid-run
+  still loses the work. It no longer strands the job: `db.reconcile_interrupted_jobs`
+  runs at API startup and fails anything left on `running`/`queued` with a
+  message telling the user to re-run it. A real queue with retries is roadmap.
 - Steps are stored as JSON inside a version row, so there is no way to query
   across documents ("every SOP that mentions the Submit button"). Fine at MVP
   scale, wrong at real scale.
@@ -262,6 +291,19 @@ throwaway job id when exercising the offline path.
      similarity, so regeneration was most likely to discard the most
      carefully-written steps. `Step.identity_view` judges identity on
      model-written text on both sides, using `StepMeta.generated_values`.
+
+- **A diff must not consume the comparison it just made.** `diff --save`
+  attaches the NEW job to the document and stores the merged SOP as its latest
+  version. `latest_sop_for_job` then returned that merged version for *both*
+  job ids, so the second run compared the new SOP against itself: **6 unchanged,
+  sim=1.000**, every time. The headline demo worked exactly once per document
+  and then went quiet — no error, no warning, and the output looks like good
+  news, which is the worst failure mode available. Fixed with
+  `latest_sop_for_job(..., before_job=)`: the old side reads the newest version
+  numbered *below* the new job's first contribution. Versions are append-only,
+  so that also excludes hand edits made after the merge, which belong to the new
+  side of the history. Regression-tested in `test_the_same_diff_can_be_run_twice`,
+  which fails without the fix.
 
 - **Escalation must reach below `match_threshold`.** The ambiguous band's floor
   *was* the match threshold, so a pair scoring under it was never adjudicated —

@@ -34,20 +34,30 @@ export function SopEditor({ documentId, sop, diffEntries, onSaved }: Props) {
     if (entry.lineage_id) statusByLineage[entry.lineage_id] = entry.status;
   }
 
-  const editor = useEditor(
-    {
-      extensions: [...extensions, UndoRedo],
-      content: sopToDoc(sop, statusByLineage),
-      onUpdate: () => setDirty(true),
-    },
-    [sop.sop_id, sop.version],
-  );
+  // One editor per mounted version. App keys this component on
+  // `sop_id:version`, so switching version remounts it and we get a fresh
+  // editor with fresh undo history.
+  //
+  // It used to pass `[sop.sop_id, sop.version]` as useEditor's dependencies,
+  // which destroys and rebuilds the editor in place. React then ran the effect
+  // below holding the *destroyed* instance: the `if (editor)` guard passed,
+  // because the object still exists, but its view was gone and reading
+  // `.commands` threw. That crashed the whole component tree, so clicking an
+  // older version blanked the page with no error shown anywhere.
+  const editor = useEditor({
+    extensions: [...extensions, UndoRedo],
+    content: sopToDoc(sop, statusByLineage),
+    onUpdate: () => setDirty(true),
+  });
 
+  // Only the diff overlay can change without a remount — it arrives after the
+  // document loads, and it colours the steps.
   useEffect(() => {
-    if (editor) editor.commands.setContent(sopToDoc(sop, statusByLineage));
+    if (!editor || editor.isDestroyed) return;
+    editor.commands.setContent(sopToDoc(sopRef.current, statusByLineage));
     setDirty(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sop.sop_id, sop.version, diffEntries]);
+  }, [editor, diffEntries]);
 
   async function save() {
     if (!editor) return;

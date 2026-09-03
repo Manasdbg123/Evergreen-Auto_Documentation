@@ -7,6 +7,7 @@ without an API key and without a real recording.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -20,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 from app.config import load_config  # noqa: E402
 from app.pipeline.base import JobPaths  # noqa: E402
 from app.pipeline.detect_changes import DetectChangesStage  # noqa: E402
-from app.pipeline.frames import FramesStage  # noqa: E402
+from app.pipeline.frames import FramesStage, _FrameClock  # noqa: E402
 from app.pipeline.ingest import IngestStage, place_upload  # noqa: E402
 from app.pipeline.select_candidates import SelectCandidatesStage  # noqa: E402
 from app.pipeline.video import ink_iou, ink_mask  # noqa: E402
@@ -38,12 +39,32 @@ def _build(variant: str, tmp: Path) -> Path:
     return out
 
 
-@pytest.fixture(scope="session")
-def cfg():
+@pytest.fixture(scope="module", autouse=True)
+def isolated_data_dir(tmp_path_factory):
+    """Keep the fixture jobs out of the real `data/jobs/`.
+
+    These tests run the full stage-1 pipeline over generated videos. Without
+    this they wrote `data/jobs/test_v1`, `test_v2` and `test_noisy` into the
+    same directory as the demo, so a test run littered the demo directory and
+    two concurrent pytest runs raced on identical job ids. `EVERGREEN_DATA_DIR`
+    is read through the `Config.data_root` property on every access, so it
+    takes effect on the already-cached config object.
+    """
+    previous = os.environ.get("EVERGREEN_DATA_DIR")
+    os.environ["EVERGREEN_DATA_DIR"] = str(tmp_path_factory.mktemp("data"))
+    yield
+    if previous is None:
+        os.environ.pop("EVERGREEN_DATA_DIR", None)
+    else:
+        os.environ["EVERGREEN_DATA_DIR"] = previous
+
+
+@pytest.fixture(scope="module")
+def cfg(isolated_data_dir):
     return load_config()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def jobs(cfg, tmp_path_factory):
     """Run the full stage-1 pipeline once per variant."""
     tmp = tmp_path_factory.mktemp("fixtures")
@@ -62,6 +83,82 @@ def _stage(job: JobPaths, name: str) -> dict:
     import json
 
     return json.loads(job.stage_file(name).read_text())
+
+
+# --------------------------------------------------------------------------
+# Frame sampling
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("variant", ["v1", "v2"])
+def test_sampling_covers_the_whole_recording(jobs, cfg, variant):
+    """The timeline must span the video, at roughly the configured rate.
+
+    Undersampling is the failure that hides: every later stage keeps working
+    on a short timeline and produces a plausible, wrong SOP with no error
+    anywhere. Only this stage knows how many samples there should have been.
+    """
+    data = _stage(jobs[variant], "frames")
+    expected = data["duration"] * cfg.frames.sample_fps
+    assert data["count"] >= expected * 0.8, (
+        f"sampled {data['count']} frames from {data['duration']:.1f}s at "
+        f"{cfg.frames.sample_fps}fps — expected about {expected:.0f}"
+    )
+    last = data["frames"][-1]["timestamp"]
+    assert last >= data["duration"] * 0.8, (
+        f"sampling stopped at {last:.1f}s of {data['duration']:.1f}s"
+    )
+
+
+class _FakeCap:
+    """Stands in for cv2.VideoCapture's metadata, which is what lies."""
+
+    def __init__(self, fps, pts=None):
+        self._fps, self._pts, self._i = fps, pts, -1
+
+    def get(self, prop):
+        if prop == cv2.CAP_PROP_FPS:
+            return self._fps
+        if prop == cv2.CAP_PROP_POS_MSEC:
+            if self._pts is None:
+                return 0.0
+            self._i += 1
+            return self._pts[min(self._i, len(self._pts) - 1)]
+        return 0.0
+
+
+def test_frame_clock_prefers_real_timestamps():
+    clock = _FrameClock(_FakeCap(30.0, pts=[0.0, 100.0, 250.0]), None, 10.0)
+    assert clock.time_of(0) == 0.0
+    assert clock.time_of(1) == pytest.approx(0.10)
+    # 250ms after two frames is not 2/30s — the container's own clock wins.
+    assert clock.time_of(2) == pytest.approx(0.25)
+
+
+def test_frame_clock_falls_back_when_timestamps_are_dead():
+    """Some backends return 0 for every frame; that must not stack every
+    sample at t=0 and collapse the recording to one candidate."""
+    clock = _FrameClock(_FakeCap(30.0, pts=None), None, 10.0)
+    times = [clock.time_of(i) for i in range(4)]
+    assert times == pytest.approx([0.0, 1 / 30, 2 / 30, 3 / 30])
+
+
+def test_frame_clock_rejects_an_impossible_declared_rate(monkeypatch):
+    """The regression. GNOME's recorder writes r_frame_rate=1000/1 into a
+    variable-frame-rate WebM. Believing it made a 43s recording yield three
+    samples, and the SOP came out with one step and no error."""
+    import app.pipeline.frames as frames_mod
+
+    monkeypatch.setattr(frames_mod, "_count_fps", lambda src, duration: 28.6)
+    clock = _FrameClock(_FakeCap(1000.0, pts=None), None, 43.1)
+    assert "counted" in clock.basis
+
+    # Consumed in order, as the decode loop does — the clock is sequential.
+    times = [clock.time_of(i) for i in range(287)]
+    assert times[-1] == pytest.approx(10.0, abs=0.05), (
+        "believing the declared 1000fps puts frame 286 at 0.29s, so the whole "
+        "recording collapses into the first fraction of a second"
+    )
 
 
 # --------------------------------------------------------------------------

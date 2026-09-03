@@ -217,6 +217,37 @@ def test_diff_finds_the_rename_rather_than_remove_plus_add(client, cfg, document
     )
 
 
+def test_the_same_diff_can_be_run_twice(client, cfg, document):
+    """Running the diff must not destroy the comparison it just made.
+
+    Regression. Running a diff saves the merged SOP as the document's newest
+    version, attributed to the NEW job. `latest_sop_for_job` then returned that
+    merged version for BOTH job ids, so the second run compared the new SOP
+    against itself and reported every step unchanged. The headline demo worked
+    exactly once per document and then silently went quiet — the worst possible
+    failure mode, because nothing errors and the output looks like good news.
+    """
+    db.create_job(cfg, DEMO_V2)
+    payload = {"job_id": DEMO_V2, "offline": True}
+
+    first = client.post(f"/api/documents/{document}/diff", json=payload).json()
+    second = client.post(f"/api/documents/{document}/diff", json=payload).json()
+
+    def renamed(body):
+        return [e for e in body["diff"]["entries"]
+                if any(c["field"] == "ui_element.label" for c in e["field_changes"])]
+
+    assert renamed(first), "first run did not report the rename"
+    assert renamed(second), (
+        "the rename vanished on the second run — the old side of the diff is "
+        "reading the merged version the first run wrote"
+    )
+    assert second["diff"]["summary"] == first["diff"]["summary"], (
+        f"the same two recordings diffed differently on a re-run: "
+        f"{first['diff']['summary']} then {second['diff']['summary']}"
+    )
+
+
 def test_rejecting_a_change_restores_the_previous_text(client, cfg, document):
     db.create_job(cfg, DEMO_V2)
     resp = client.post(f"/api/documents/{document}/diff",
@@ -260,3 +291,35 @@ def test_unknown_ids_are_404_not_500(client):
     assert client.get("/api/documents/doc_nope").status_code == 404
     assert client.get("/api/jobs/job_nope").status_code == 404
     assert client.get("/api/diffs/diff_nope").status_code == 404
+
+
+def test_a_job_left_running_by_a_restart_is_failed_not_stranded(client, cfg):
+    """Jobs run in-process, so nothing survives a restart.
+
+    Without reconciliation these rows stayed `running` forever and the UI
+    showed a spinner that could never resolve — with no error anywhere to
+    explain why.
+    """
+    db.create_job(cfg, "job_stranded")
+    db.set_job_status(cfg, "job_stranded", "running", stage="structure")
+
+    stranded = db.reconcile_interrupted_jobs(cfg)
+    assert "job_stranded" in stranded
+
+    record = client.get("/api/jobs/job_stranded").json()
+    assert record["status"] == "failed"
+    assert "Interrupted" in (record["error"] or ""), (
+        "a stranded job must say why it stopped, not just fail silently"
+    )
+
+
+def test_reconciliation_leaves_finished_and_unstarted_jobs_alone(client, cfg):
+    """It must only touch jobs that were mid-flight."""
+    db.create_job(cfg, "job_done")
+    db.set_job_status(cfg, "job_done", "complete")
+    db.create_job(cfg, "job_fresh")  # status 'created' — made, never run
+
+    db.reconcile_interrupted_jobs(cfg)
+
+    assert db.get_job(cfg, "job_done")["status"] == "complete"
+    assert db.get_job(cfg, "job_fresh")["status"] == "created"

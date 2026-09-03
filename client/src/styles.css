@@ -1,163 +1,702 @@
-/* Minimum viable styling, as the brief asks. Enough structure to read a diff
-   and edit a document; no design system, no component library. */
+/* Evergreen.
+ *
+ * Two surfaces with deliberately different characters, because they are doing
+ * different jobs:
+ *
+ *   The review panel is an INSTRUMENT — sans-serif, dense, tabular figures,
+ *   status encoded in shape as well as colour so what needs attention reads at
+ *   a glance.
+ *
+ *   The editor is a DOCUMENT — serif, generous measure, roomy. It is the thing
+ *   that eventually ships to a reader, and it should look like it.
+ *
+ * Colour rule: colour means diff status and nothing else. Chrome is neutral, so
+ * anything coloured on screen is telling you something changed. The accent
+ * (cyan) is reserved for interactive state and never overlaps the status set.
+ *
+ * Theme: three states, not two. An explicit choice stamps data-theme on <html>;
+ * the default "system" setting stamps nothing, so only prefers-color-scheme
+ * separates light from dark. Every token is declared in the bare :root first.
+ */
 
 :root {
-  --bg: #ffffff;
-  --fg: #16181d;
-  --muted: #6b7280;
-  --line: #e3e5e9;
-  --panel: #f7f8fa;
-  --accent: #2563eb;
-  --added: #12855b;
-  --added-bg: #e8f6f0;
-  --removed: #b42318;
-  --removed-bg: #fdeceb;
-  --modified: #a15c00;
-  --modified-bg: #fdf3e3;
-  --moved: #6b3fbe;
-  --moved-bg: #f1ecfc;
+  --ground: #f2f4f7;
+  --surface: #ffffff;
+  --surface-2: #eaedf2;
+  --surface-3: #f7f8fa;
+
+  --fg: #14171d;
+  --fg-2: #464f5d;
+  --muted: #6d7786;
+  --line: #dde1e8;
+  --line-strong: #c2c8d2;
+
+  --accent: #0e7490;
+  --accent-fg: #ffffff;
+  --accent-wash: #e2f2f6;
+
+  --added: #15803d;
+  --added-bg: #e9f5ed;
+  --removed: #b3261e;
+  --removed-bg: #fbeae8;
+  --modified: #a16207;
+  --modified-bg: #fbf1de;
+  --moved: #6d28d9;
+  --moved-bg: #f0eafc;
+
+  --shadow: 0 1px 2px rgba(16, 20, 28, .05), 0 4px 14px rgba(16, 20, 28, .05);
+  --shadow-lift: 0 2px 4px rgba(16, 20, 28, .07), 0 10px 30px rgba(16, 20, 28, .09);
+
+  --sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --serif: "Spectral", Georgia, "Times New Roman", serif;
+
+  --radius: 10px;
+  --radius-sm: 6px;
+
   color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0f1116;
+    --surface: #171a21;
+    --surface-2: #1f232b;
+    --surface-3: #14171d;
+
+    --fg: #e8eaef;
+    --fg-2: #aab2be;
+    --muted: #7b8390;
+    --line: #282d36;
+    --line-strong: #3a414c;
+
+    --accent: #22b8cf;
+    --accent-fg: #06202a;
+    --accent-wash: #13303a;
+
+    --added: #5fbf88;
+    --added-bg: #16271e;
+    --removed: #e8837a;
+    --removed-bg: #2b1c1b;
+    --modified: #d6a441;
+    --modified-bg: #2a2317;
+    --moved: #a98bee;
+    --moved-bg: #221d33;
+
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 14px rgba(0, 0, 0, .3);
+    --shadow-lift: 0 2px 4px rgba(0, 0, 0, .45), 0 10px 30px rgba(0, 0, 0, .4);
+
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --ground: #0f1116;
+  --surface: #171a21;
+  --surface-2: #1f232b;
+  --surface-3: #14171d;
+
+  --fg: #e8eaef;
+  --fg-2: #aab2be;
+  --muted: #7b8390;
+  --line: #282d36;
+  --line-strong: #3a414c;
+
+  --accent: #22b8cf;
+  --accent-fg: #06202a;
+  --accent-wash: #13303a;
+
+  --added: #5fbf88;
+  --added-bg: #16271e;
+  --removed: #e8837a;
+  --removed-bg: #2b1c1b;
+  --modified: #d6a441;
+  --modified-bg: #2a2317;
+  --moved: #a98bee;
+  --moved-bg: #221d33;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 14px rgba(0, 0, 0, .3);
+  --shadow-lift: 0 2px 4px rgba(0, 0, 0, .45), 0 10px 30px rgba(0, 0, 0, .4);
+
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
 
 body {
   margin: 0;
-  background: var(--bg);
+  background: var(--ground);
   color: var(--fg);
-  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
 }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ---------------------------------------------------------------- header -- */
 
 header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 1rem;
   flex-wrap: wrap;
-  padding: 1rem 1.5rem;
+  padding: .85rem 1.5rem;
+  background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
-header h1 { font-size: 1.1rem; margin: 0; }
 
-.hint { color: var(--muted); font-size: .85rem; }
-.note { color: var(--muted); font-size: .9rem; }
+header h1 {
+  font-family: var(--serif);
+  font-size: 1.2rem;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  margin: 0;
+  padding-right: 1rem;
+  border-right: 1px solid var(--line);
+}
+
+/* Push the controls to the right edge. The provider readout is optional — it
+   only appears once /api/health answers — so whichever of the two comes first
+   takes the auto margin. */
+header .theme-toggle { margin-left: auto; }
+header .provider { margin-left: auto; }
+header .provider + .theme-toggle { margin-left: 0; }
+
+.hint { color: var(--muted); font-size: .82rem; }
+.note { color: var(--muted); font-size: .88rem; }
+
 .error {
   color: var(--removed);
   background: var(--removed-bg);
+  border: 1px solid var(--removed);
   padding: .6rem .9rem;
   margin: 1rem 1.5rem;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
 }
 
-.layout { display: grid; grid-template-columns: 280px 1fr; min-height: 90vh; }
-aside { border-right: 1px solid var(--line); padding: 1rem; background: var(--panel); }
-aside h2 { font-size: .8rem; text-transform: uppercase; color: var(--muted); margin: 0 0 .75rem; letter-spacing: .04em; }
-main { padding: 1.25rem 1.5rem; max-width: 62rem; }
+/* Model/provider readout: this is data, so it gets the data face. */
+.provider {
+  font-family: var(--mono);
+  font-size: .75rem;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: .15rem .5rem;
+}
+
+.theme-toggle {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.theme-toggle button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: .2rem .55rem;
+  font-size: .75rem;
+  border-radius: 4px;
+  box-shadow: none;
+}
+.theme-toggle button:hover { background: var(--surface); color: var(--fg); box-shadow: none; }
+.theme-toggle button.on {
+  background: var(--surface);
+  color: var(--fg);
+  border: none;
+  box-shadow: var(--shadow);
+}
+
+/* ---------------------------------------------------------------- layout -- */
+
+.layout {
+  display: grid;
+  grid-template-columns: 268px minmax(0, 1fr);
+  align-items: start;
+  min-height: calc(100vh - 56px);
+}
+
+aside {
+  position: sticky;
+  top: 56px;
+  align-self: start;
+  /* Sticky needs `align-self: start`, which stops the grid item stretching —
+     so the panel is given the viewport height explicitly. Without both, the
+     sidebar's background stopped partway down the column. */
+  min-height: calc(100vh - 56px);
+  max-height: calc(100vh - 56px);
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+  padding: 1.15rem 1rem;
+  background: var(--surface-3);
+}
+
+aside h2 {
+  font-family: var(--mono);
+  font-size: .68rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 .8rem;
+  letter-spacing: .12em;
+}
+
+main {
+  padding: 1.5rem 1.75rem 5rem;
+  max-width: 64rem;
+  min-width: 0;
+}
+
+@media (max-width: 860px) {
+  .layout { grid-template-columns: 1fr; }
+  aside {
+    position: static;
+    min-height: 0;
+    max-height: none;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+  main { padding: 1.25rem 1rem 4rem; }
+}
+
+/* Nothing selected. Says what to do rather than leaving a blank column. */
+main > .note:only-child {
+  display: block;
+  margin-top: 2rem;
+  padding: 2rem 2.25rem;
+  max-width: 42rem;
+  background: var(--surface);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  font-family: var(--serif);
+  font-size: 1.05rem;
+  color: var(--fg-2);
+  text-align: center;
+}
+
+/* ------------------------------------------------------------- documents -- */
 
 .doclist { list-style: none; margin: 1rem 0 0; padding: 0; }
-.doclist li { margin-bottom: .25rem; }
-.doclist button { width: 100%; text-align: left; }
+.doclist li { margin-bottom: .3rem; }
+
+.doclist button {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: .5rem;
+  background: var(--surface);
+  padding: .5rem .7rem;
+  box-shadow: none;
+}
+.doclist button .hint {
+  font-family: var(--mono);
+  font-size: .7rem;
+  font-variant-numeric: tabular-nums;
+}
+/* The selected document gets a left rail rather than a fill, so the sidebar
+   keeps one flat surface and the marker is unmissable at a glance. */
+.doclist button.on {
+  border-color: var(--line-strong);
+  color: var(--fg);
+  box-shadow: inset 3px 0 0 var(--accent);
+  font-weight: 500;
+}
+
+/* --------------------------------------------------------------- buttons -- */
 
 button, .filebutton {
   font: inherit;
-  border: 1px solid var(--line);
-  background: #fff;
-  color: inherit;
-  border-radius: 5px;
-  padding: .35rem .7rem;
+  font-size: .85rem;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--fg);
+  border-radius: var(--radius-sm);
+  padding: .38rem .75rem;
   cursor: pointer;
+  box-shadow: var(--shadow);
+  transition: background .12s ease, border-color .12s ease, color .12s ease;
 }
-button:hover, .filebutton:hover { border-color: #c9ccd2; }
-button:disabled { opacity: .5; cursor: default; }
-button.on { border-color: var(--accent); color: var(--accent); }
-button.on.danger { border-color: var(--removed); color: var(--removed); }
+button:hover:not(:disabled), .filebutton:hover { background: var(--surface-2); }
+button:disabled { opacity: .45; cursor: default; box-shadow: none; }
+button.on { border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }
+button.on.danger { border-color: var(--removed); color: var(--removed); background: var(--removed-bg); }
 
-.filebutton { display: inline-block; }
+.filebutton { display: inline-flex; align-items: center; gap: .4rem; }
 .filebutton input { display: none; }
+.filebutton:has(input:disabled) { opacity: .45; cursor: default; }
 
 a { color: var(--accent); }
 
-.upload { margin: .5rem 0; }
-.progress { margin-top: .6rem; font-size: .8rem; }
-.progress code { color: var(--muted); }
-.stages { display: flex; flex-wrap: wrap; gap: .3rem; margin: .4rem 0; }
-.stage { color: var(--muted); border: 1px solid var(--line); border-radius: 3px; padding: 0 .35rem; font-size: .72rem; }
-.stage.done { color: var(--added); border-color: var(--added); }
-.stage.active { color: var(--accent); border-color: var(--accent); font-weight: 600; }
+/* ---------------------------------------------------------------- upload -- */
 
-.dochead h2 { margin: 0 0 .2rem; font-size: 1.35rem; }
-.versions { display: flex; gap: .3rem; margin: .6rem 0; flex-wrap: wrap; }
-.versions button { padding: .15rem .5rem; font-size: .8rem; }
+.upload { margin: .6rem 0; }
 
-/* ---- diff review ---- */
+.progress {
+  margin-top: .7rem;
+  padding: .7rem .8rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: .8rem;
+}
+.progress code {
+  font-family: var(--mono);
+  font-size: .72rem;
+  color: var(--muted);
+}
 
-.review { border: 1px solid var(--line); border-radius: 7px; padding: 1rem; margin: 1.25rem 0; }
-.review-head { display: flex; gap: .75rem; align-items: baseline; flex-wrap: wrap; margin-bottom: .5rem; }
-.review-foot { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin-top: .75rem; }
+/* The eight stages are a sequence, so they are laid out as one, left to right,
+   with completion reading as a filled run rather than eight scattered chips. */
+.stages { display: flex; flex-wrap: wrap; gap: .25rem; margin: .5rem 0 .3rem; }
+.stage {
+  font-family: var(--mono);
+  font-size: .65rem;
+  letter-spacing: .02em;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: .1rem .35rem;
+}
+.stage.done { color: var(--added); background: var(--added-bg); }
+.stage.active {
+  color: var(--accent);
+  background: var(--accent-wash);
+  border-color: var(--accent);
+  font-weight: 500;
+}
 
-.entry { border: 1px solid var(--line); border-left-width: 3px; border-radius: 5px; padding: .7rem .85rem; margin: .6rem 0; }
+/* ------------------------------------------------------------- doc header -- */
+
+.dochead {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.15rem 1.25rem;
+  box-shadow: var(--shadow);
+}
+.dochead h2 {
+  font-family: var(--serif);
+  margin: 0 0 .25rem;
+  font-size: 1.55rem;
+  font-weight: 600;
+  letter-spacing: -.015em;
+  line-height: 1.2;
+  text-wrap: balance;
+}
+.dochead > .hint { display: block; max-width: 62ch; }
+
+/* Versions are a timeline, so they sit in one connected track. */
+.versions { display: flex; gap: .25rem; margin: .9rem 0; flex-wrap: wrap; align-items: center; }
+.versions button {
+  padding: .2rem .55rem;
+  font-family: var(--mono);
+  font-size: .72rem;
+  font-variant-numeric: tabular-nums;
+  box-shadow: none;
+}
+.versions button.on { font-weight: 500; }
+
+/* ----------------------------------------------------------- diff review -- */
+
+.review {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.1rem 1.25rem;
+  margin: 1.25rem 0;
+  box-shadow: var(--shadow);
+}
+
+.review-head {
+  display: flex;
+  gap: .75rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding-bottom: .7rem;
+  margin-bottom: .3rem;
+  border-bottom: 1px solid var(--line);
+}
+.review-head strong {
+  font-family: var(--mono);
+  font-size: .95rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -.01em;
+}
+
+.review-foot {
+  display: flex;
+  gap: .75rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: .9rem;
+  padding-top: .8rem;
+  border-top: 1px solid var(--line);
+}
+
+/* A settled diff is history, not a task. Quieter surface, collapsed by
+   default, and no buttons anywhere inside it. */
+.review.settled { background: var(--surface-3); padding: 0; }
+.review.settled > summary {
+  cursor: pointer;
+  padding: .85rem 1.25rem;
+  display: flex;
+  gap: .75rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  list-style: none;
+}
+.review.settled > summary::-webkit-details-marker { display: none; }
+.review.settled > summary::before {
+  content: "▸";
+  color: var(--muted);
+  font-size: .8rem;
+}
+.review.settled[open] > summary::before { content: "▾"; }
+.review.settled > summary strong {
+  font-family: var(--mono);
+  font-size: .88rem;
+  font-variant-numeric: tabular-nums;
+}
+.review.settled > summary:hover { background: var(--surface-2); }
+.review.settled > .review-head,
+.review.settled > .entry { margin-left: 1.25rem; margin-right: 1.25rem; }
+.review.settled > .entry:last-child { margin-bottom: 1.1rem; }
+.review.settled > .review-head { border-bottom: none; padding-bottom: 0; }
+
+/* The verdict already recorded on the server, shown where the buttons were. */
+.verdict {
+  font-family: var(--mono);
+  font-size: .68rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: .1rem .4rem;
+  border-radius: 3px;
+  margin-left: auto;
+}
+.verdict-accepted { color: var(--added); background: var(--added-bg); }
+.verdict-rejected { color: var(--removed); background: var(--removed-bg); }
+
+/* One entry per changed step. The left stripe carries the status, so the
+   shape of the list tells you what happened before you read a word. */
+.entry {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: .8rem .95rem;
+  margin: .65rem 0;
+  background: var(--surface);
+}
 .entry-added { border-left-color: var(--added); background: var(--added-bg); }
 .entry-removed { border-left-color: var(--removed); background: var(--removed-bg); }
 .entry-modified { border-left-color: var(--modified); background: var(--modified-bg); }
 .entry-reordered { border-left-color: var(--moved); background: var(--moved-bg); }
+/* An unchanged step only appears here when it carried a hand edit through the
+   regeneration. It is reassurance, not a decision, so it stays quiet. */
+.entry-unchanged { background: var(--surface); border-left-color: var(--line-strong); }
 
-.entry-head { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap; }
-.badge { font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+.entry-head { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+
+.badge {
+  font-size: .66rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  padding: .15rem .45rem;
+  border-radius: 3px;
+  background: var(--surface);
+  border: 1px solid currentColor;
+}
 .badge-added { color: var(--added); }
 .badge-removed { color: var(--removed); }
 .badge-modified { color: var(--modified); }
 .badge-reordered { color: var(--moved); }
-.pos { font-size: .8rem; color: var(--muted); }
-.tag { font-size: .7rem; color: var(--muted); border: 1px solid var(--line); border-radius: 3px; padding: 0 .3rem; background: #fff; }
+.badge-unchanged { color: var(--muted); }
 
-.rationale { font-size: .82rem; color: var(--muted); margin: .35rem 0; }
-.preserved { font-size: .82rem; color: var(--added); margin: .35rem 0; font-weight: 600; }
+.pos {
+  font-family: var(--mono);
+  font-size: .74rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-2);
+}
+.tag {
+  font-family: var(--mono);
+  font-size: .68rem;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: .05rem .35rem;
+  background: var(--surface);
+  font-variant-numeric: tabular-nums;
+}
 
-.change { display: grid; grid-template-columns: 9rem 1fr auto 1fr; gap: .5rem; align-items: baseline; font-size: .82rem; margin: .3rem 0; }
-.change .field { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .75rem; }
-.change .old { text-decoration: line-through; color: var(--removed); }
-.change .new { color: var(--added); }
+.rationale { font-size: .82rem; color: var(--fg-2); margin: .45rem 0 .3rem; }
+
+/* The product's central promise, so it is the one thing here allowed to shout. */
+.preserved {
+  font-size: .82rem;
+  color: var(--added);
+  background: var(--added-bg);
+  border: 1px solid var(--added);
+  border-radius: var(--radius-sm);
+  padding: .35rem .6rem;
+  margin: .5rem 0;
+  font-weight: 500;
+}
+
+/* A field change is a record, not prose: fixed columns, monospaced key. */
+.change {
+  display: grid;
+  grid-template-columns: 10rem minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: .5rem;
+  align-items: baseline;
+  font-size: .81rem;
+  margin: .3rem 0;
+  padding: .3rem 0;
+  border-top: 1px dashed var(--line);
+  overflow-wrap: anywhere;
+}
+.change .field {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: .72rem;
+}
+.change .old { text-decoration: line-through; color: var(--removed); opacity: .85; }
+.change .new { color: var(--added); font-weight: 500; }
 .change .arrow { color: var(--muted); }
 
-.actions { display: flex; gap: .4rem; margin-top: .5rem; }
-.actions button { padding: .2rem .6rem; font-size: .8rem; }
+@media (max-width: 720px) {
+  .change { grid-template-columns: 1fr; gap: .15rem; }
+  .change .arrow { display: none; }
+}
 
-/* ---- editor ---- */
+.actions { display: flex; gap: .4rem; margin-top: .65rem; }
+.actions button { padding: .25rem .7rem; font-size: .78rem; box-shadow: none; }
 
-.editor { margin-top: 1.5rem; }
-.toolbar { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; padding-bottom: .6rem; border-bottom: 1px solid var(--line); }
+.crash {
+  border: 1px solid var(--removed);
+  border-left: 3px solid var(--removed);
+  background: var(--removed-bg);
+  border-radius: var(--radius-sm);
+  padding: 1rem 1.15rem;
+  margin: 1.25rem 0;
+}
+.crash pre {
+  font-family: var(--mono);
+  font-size: .78rem;
+  color: var(--removed);
+  white-space: pre-wrap;
+  overflow-x: auto;
+  margin: .5rem 0 .8rem;
+}
 
-.prose { margin-top: 1rem; }
+/* ---------------------------------------------------------------- editor -- */
+
+.editor {
+  margin-top: 1.5rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.toolbar {
+  display: flex;
+  gap: .5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: .8rem 1.25rem;
+  background: var(--surface-3);
+  border-bottom: 1px solid var(--line);
+}
+.toolbar a {
+  font-size: .8rem;
+  text-decoration: none;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: .34rem .7rem;
+}
+.toolbar a:hover { background: var(--surface-2); }
+.toolbar .hint { margin-left: auto; text-align: right; }
+
+.editor > .note { margin: .9rem 1.25rem 0; }
+
+.prose { padding: 1.25rem; }
 .ProseMirror { outline: none; }
 .ProseMirror:focus { outline: none; }
 
+/* A step is the document's unit, and it is also the diff's unit. Same object
+   on both surfaces, so it gets the same left-stripe language as an entry. */
 .step {
   border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: .9rem 1.1rem;
-  margin: 0 0 1rem;
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 1rem 1.15rem;
+  margin: 0 0 .9rem;
   position: relative;
+  background: var(--surface);
+  transition: border-color .12s ease;
 }
-.step[data-diff-status="added"] { border-left: 3px solid var(--added); }
-.step[data-diff-status="modified"] { border-left: 3px solid var(--modified); }
-.step[data-diff-status="reordered"] { border-left: 3px solid var(--moved); }
+.step:focus-within { border-color: var(--line-strong); }
+.step[data-diff-status="added"] { border-left-color: var(--added); }
+.step[data-diff-status="modified"] { border-left-color: var(--modified); }
+.step[data-diff-status="removed"] { border-left-color: var(--removed); }
+.step[data-diff-status="reordered"] { border-left-color: var(--moved); }
 
-.step-title { font-size: 1.02rem; font-weight: 650; margin-bottom: .3rem; }
-.step-instruction { margin-bottom: .4rem; }
-.step-expected { color: var(--muted); font-size: .88rem; }
+.step-title {
+  font-family: var(--serif);
+  font-size: 1.12rem;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  margin-bottom: .35rem;
+  line-height: 1.3;
+}
+.step-instruction { margin-bottom: .45rem; max-width: 68ch; }
+.step-expected {
+  color: var(--fg-2);
+  font-size: .87rem;
+  padding-left: .7rem;
+  border-left: 2px solid var(--line);
+  max-width: 68ch;
+}
 
 /* Empty blocks would otherwise collapse to nothing and be unclickable. */
 .step-title:empty::before,
 .step-instruction:empty::before,
 .step-expected:empty::before {
   content: attr(data-placeholder);
-  color: #b7bcc4;
+  color: var(--muted);
+  opacity: .65;
 }
 
 .step-screenshot {
   display: block;
   max-width: 100%;
-  margin-top: .7rem;
+  margin-top: .8rem;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
 }
-.step-screenshot.ProseMirror-selectednode { outline: 2px solid var(--accent); }
+.step-screenshot.ProseMirror-selectednode {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

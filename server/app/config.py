@@ -253,7 +253,16 @@ class Config(BaseModel):
 
     @property
     def data_root(self) -> Path:
-        p = Path(self.paths.data_dir)
+        """Where jobs, frames and screenshots live. `EVERGREEN_DATA_DIR`
+        overrides config.yaml.
+
+        The same reasoning as `db_file`: the stage-1 tests build fixture videos
+        and run the full pipeline over them, and without this they did that
+        inside the real `data/jobs/`. That polluted the demo directory and made
+        two concurrent pytest runs collide on the same job ids.
+        """
+        override = os.environ.get("EVERGREEN_DATA_DIR")
+        p = Path(override or self.paths.data_dir)
         return p if p.is_absolute() else REPO_ROOT / p
 
     @property
@@ -270,7 +279,16 @@ class Config(BaseModel):
         what the demo showed.
         """
         override = os.environ.get("EVERGREEN_DB")
-        p = Path(override or self.paths.db_path)
+        if override:
+            p = Path(override)
+            return p if p.is_absolute() else REPO_ROOT / p
+        # No explicit database override, but if the data directory was
+        # redirected the database has to follow it. Otherwise a test that
+        # isolated its job files would still write versions and diffs into the
+        # real demo database — the exact leak this override exists to stop.
+        if os.environ.get("EVERGREEN_DATA_DIR"):
+            return self.data_root / Path(self.paths.db_path).name
+        p = Path(self.paths.db_path)
         return p if p.is_absolute() else REPO_ROOT / p
 
     def job_dir(self, job_id: str) -> Path:

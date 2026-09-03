@@ -55,7 +55,7 @@ class DiffStage(Stage):
             )
 
         old_job = JobPaths(self.cfg, self.old_job_id)
-        old_sop = load_sop(self.cfg, self.old_job_id)
+        old_sop = load_sop(self.cfg, self.old_job_id, before_job=job.job_id)
         if old_sop is None:
             raise ValueError(
                 f"Job '{self.old_job_id}' has no SOP. Run "
@@ -111,15 +111,20 @@ class DiffStage(Stage):
         )
 
 
-def load_sop(cfg: Config, job_id: str) -> SOP | None:
+def load_sop(cfg: Config, job_id: str, *,
+             before_job: str | None = None) -> SOP | None:
     """The current SOP for a job: the stored version if there is one, else raw.
 
     Order matters — see the module docstring. The DB holds what the user has
     actually edited; `structure` holds what the model first wrote.
+
+    `before_job` is passed for the OLD side of a diff so that a merged version
+    produced by the NEW job is not mistaken for the old document's own latest
+    state. See `db.latest_sop_for_job`.
     """
     from ..db import latest_sop_for_job
 
-    stored = latest_sop_for_job(cfg, job_id)
+    stored = latest_sop_for_job(cfg, job_id, before_job=before_job)
     if stored is not None:
         return stored
 

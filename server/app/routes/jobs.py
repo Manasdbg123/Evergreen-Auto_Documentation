@@ -76,6 +76,11 @@ async def create_job(
 
     db.create_job(cfg, job_id, document_id=document_id,
                   source_name=file.filename)
+    # Record the status we are about to report. Without this the row stayed
+    # 'created' until the pipeline's first stage, so a job whose process died
+    # in that window was indistinguishable from one the CLI had made and never
+    # run — and startup reconciliation could not safely fail it.
+    db.set_job_status(cfg, job_id, "queued")
     background.add_task(_run, cfg, job_id, offline, document_id)
 
     return {"job_id": job_id, "document_id": document_id,
@@ -90,6 +95,15 @@ def _run(cfg, job_id: str, offline: bool, document_id: str | None) -> None:
         run_pipeline(cfg, job_id, offline=offline, document_id=document_id)
     except Exception as exc:  # pragma: no cover - background path
         print(f"[api] job {job_id} failed: {type(exc).__name__}: {exc}")
+        # run_pipeline records its own failures, but it can only do that once
+        # it has started. Anything raised before then — a bad config override,
+        # an unreadable upload — would otherwise leave the job on 'queued'
+        # with no explanation anywhere the user can see it.
+        try:
+            db.set_job_status(cfg, job_id, "failed",
+                              error=f"{type(exc).__name__}: {exc}")
+        except Exception:
+            pass
 
 
 @router.get("")

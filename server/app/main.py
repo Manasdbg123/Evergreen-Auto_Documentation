@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .config import load_config
-from .db import init_db
+from .db import init_db, reconcile_interrupted_jobs
 from .routes import diffs, documents, jobs
 
 
@@ -29,6 +29,14 @@ async def lifespan(api: FastAPI):
     print(f"[api] database {path}")
     print(f"[api] jobs      {cfg.jobs_root}")
     print(f"[api] provider  {cfg.llm.provider} (offline={cfg.llm.offline})")
+
+    # Jobs run in this process, so nothing can still be running at startup.
+    # Anything the database still calls running is a job whose process died,
+    # and left alone it shows the user a spinner that never resolves.
+    stranded = reconcile_interrupted_jobs(cfg)
+    if stranded:
+        print(f"[api] marked {len(stranded)} interrupted job(s) as failed: "
+              f"{', '.join(stranded)}")
 
     # Screenshots are served straight off disk. The alternative — a route that
     # reads and streams each file — would add nothing but a chance to get the
