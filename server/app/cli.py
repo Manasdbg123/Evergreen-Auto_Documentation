@@ -243,6 +243,13 @@ def cmd_inspect(args) -> int:
             detail = (f"{data.get('count')} steps, "
                       f"{data.get('low_confidence', 0)} low-confidence "
                       f"[{data.get('mode')}]")
+        elif name == "diff":
+            summary = data.get("summary") or {}
+            detail = (f"vs {data.get('old_job_id')}: "
+                      + (", ".join(f"{v} {k}" for k, v in sorted(summary.items()))
+                         or "no entries"))
+        elif name == "export":
+            detail = f"{data.get('count')} steps -> {data.get('markdown')}, {data.get('html')}"
         print(f"  [x] {name:18s} {detail}  ({data.get('_elapsed_sec')}s)")
 
     cands = read_stage(job, "select_candidates")
