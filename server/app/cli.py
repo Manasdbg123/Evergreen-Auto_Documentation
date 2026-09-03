@@ -91,49 +91,35 @@ def cmd_stage1(args) -> int:
 
 
 def cmd_run(args) -> int:
-    """The whole pipeline, ingest through export, for one job."""
+    """The whole pipeline, ingest through export, for one job.
+
+    Shares `pipeline.runner` with the API so the two cannot drift — the CLI
+    growing a stage the server forgets is the kind of difference that only
+    surfaces during a demo.
+    """
     from . import db
+    from .pipeline.runner import run_pipeline
 
     cfg = load_config()
-    db.create_job(cfg, args.job_id)
 
-    try:
-        for name in STAGE1 + LLM_STAGES + ["export"]:
-            db.set_job_status(cfg, args.job_id, "running", stage=name)
-            _build(name, cfg, args.offline).run(args.job_id, force=args.force)
-    except Exception as exc:
-        db.set_job_status(cfg, args.job_id, "failed", error=str(exc))
-        raise
-    db.set_job_status(cfg, args.job_id, "complete")
+    # Persisting is what makes the *next* recording diffable: a job whose SOP
+    # was never versioned has nothing to be the previous version of.
+    document_id = args.document
+    if args.save and not document_id:
+        document_id = db.create_document(cfg)
+
+    run_pipeline(cfg, args.job_id, offline=args.offline, force=args.force,
+                 document_id=document_id)
 
     job = JobPaths(cfg, args.job_id)
     data = read_stage(job, "structure") or {}
-    spent = _spent(job)
     print(f"\n{data.get('count', 0)} steps generated. Actual API spend this job: "
-          f"${spent:.4f}")
-
-    # Persisting here is what makes the next recording diffable. A job whose
-    # SOP was never saved has nothing to be the previous version of.
-    if args.document or args.save:
-        sop = _sop_of(cfg, args.job_id)
-        if sop is not None:
-            document_id = args.document or db.create_document(cfg, sop.title)
-            db.attach_job_to_document(cfg, args.job_id, document_id)
-            version = db.save_version(cfg, document_id, sop, job_id=args.job_id)
-            print(f"saved as {document_id} v{version}")
-            print(f"  python -m app.cli diff {args.job_id} <new_job_id>")
-
+          f"${_spent(job):.4f}")
+    if document_id:
+        print(f"saved as {document_id}")
+        print(f"  python -m app.cli diff {args.job_id} <new_job_id> --save")
     print(f"  python -m app.cli show {args.job_id}")
     return 0
-
-
-def _sop_of(cfg, job_id: str):
-    from .models import SOP
-
-    data = read_stage(JobPaths(cfg, job_id), "structure")
-    if not data or not data.get("sop"):
-        return None
-    return SOP.model_validate(data["sop"])
 
 
 def cmd_diff(args) -> int:

@@ -262,7 +262,15 @@ class Config(BaseModel):
 
     @property
     def db_file(self) -> Path:
-        p = Path(self.paths.db_path)
+        """Where SQLite lives. `EVERGREEN_DB` overrides config.yaml.
+
+        The override exists so a test run — or a second instance — can point at
+        a scratch database instead of the real one. Without it the API tests
+        wrote documents and versions into the demo database and quietly changed
+        what the demo showed.
+        """
+        override = os.environ.get("EVERGREEN_DB")
+        p = Path(override or self.paths.db_path)
         return p if p.is_absolute() else REPO_ROOT / p
 
     def job_dir(self, job_id: str) -> Path:
