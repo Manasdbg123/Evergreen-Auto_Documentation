@@ -36,9 +36,15 @@ from .config import Config, load_config
 from .models import SOP, DiffResult, new_id
 
 SCHEMA = """
+-- `app` is the product the procedure belongs to — "LeetCode", "Salesforce".
+-- A plain column rather than a table of its own: at this size a group is just
+-- a name documents share, and a table would buy a join and a second set of
+-- ids for nothing. It becomes a table the day a group needs to own anything
+-- (an owner, a release calendar, permissions).
 CREATE TABLE IF NOT EXISTS documents (
     document_id TEXT PRIMARY KEY,
     title       TEXT NOT NULL DEFAULT 'Untitled procedure',
+    app         TEXT NOT NULL DEFAULT '',
     created_at  REAL NOT NULL,
     updated_at  REAL NOT NULL
 );
@@ -95,10 +101,27 @@ def connect(cfg: Config | None = None) -> Iterator[sqlite3.Connection]:
     conn.execute("PRAGMA foreign_keys=ON")
     try:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         yield conn
         conn.commit()
     finally:
         conn.close()
+
+
+#: Columns added after the first release. `CREATE TABLE IF NOT EXISTS` does
+#: nothing to a table that already exists, so a new column has to be added
+#: explicitly or every existing database breaks on the next query.
+_ADDED_COLUMNS = {
+    "documents": [("app", "TEXT NOT NULL DEFAULT ''")],
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, columns in _ADDED_COLUMNS.items():
+        have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in columns:
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 def init_db(cfg: Config | None = None) -> Path:
@@ -216,17 +239,45 @@ def attach_job_to_document(cfg: Config, job_id: str, document_id: str) -> None:
 # --------------------------------------------------------------------------
 
 
-def create_document(cfg: Config, title: str = "Untitled procedure",
-                    document_id: str | None = None) -> str:
+#: What `create_document` uses when nothing named the procedure. Recognised
+#: later so the first generated SOP may replace it — see `save_version`.
+PLACEHOLDER_TITLE = "Untitled procedure"
+
+
+def create_document(cfg: Config, title: str = PLACEHOLDER_TITLE,
+                    document_id: str | None = None, app: str = "") -> str:
     document_id = document_id or new_id("doc")
     now = time.time()
     with connect(cfg) as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO documents (document_id, title, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?)",
-            (document_id, title, now, now),
+            "INSERT OR IGNORE INTO documents "
+            "(document_id, title, app, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (document_id, title, app.strip(), now, now),
         )
     return document_id
+
+
+def update_document(cfg: Config, document_id: str, *, title: str | None = None,
+                    app: str | None = None) -> bool:
+    """Rename a document or move it to another app. False if it is unknown."""
+    sets, values = [], []
+    if title is not None and title.strip():
+        sets.append("title = ?")
+        values.append(title.strip())
+    if app is not None:
+        sets.append("app = ?")
+        values.append(app.strip())
+    if not sets:
+        return True
+    sets.append("updated_at = ?")
+    values.extend([time.time(), document_id])
+    with connect(cfg) as conn:
+        cur = conn.execute(
+            f"UPDATE documents SET {', '.join(sets)} WHERE document_id = ?",
+            tuple(values),
+        )
+    return cur.rowcount > 0
 
 
 def get_document(cfg: Config, document_id: str) -> dict[str, Any] | None:
@@ -286,9 +337,16 @@ def save_version(cfg: Config, document_id: str, sop: SOP, *,
             (new_id("ver"), document_id, version, job_id, source,
              stored.model_dump_json(), now),
         )
+        # The document's name is only taken from the SOP while it is still the
+        # placeholder. It used to be overwritten on every save, so the name in
+        # the sidebar silently changed to whatever the model called the newest
+        # recording — and a name the user had chosen could not survive a single
+        # regeneration.
         conn.execute(
-            "UPDATE documents SET updated_at = ?, title = ? WHERE document_id = ?",
-            (now, stored.title, document_id),
+            "UPDATE documents SET updated_at = ?, title = "
+            "  CASE WHEN title = ? THEN ? ELSE title END "
+            "WHERE document_id = ?",
+            (now, PLACEHOLDER_TITLE, stored.title or PLACEHOLDER_TITLE, document_id),
         )
     return version
 
@@ -311,13 +369,29 @@ def get_version(cfg: Config, document_id: str, version: int | None = None) -> SO
 
 
 def list_versions(cfg: Config, document_id: str) -> list[dict[str, Any]]:
+    """Version rows, each carrying the title the SOP had at that point.
+
+    The title is what the model called the workflow, so it names the procedure
+    that version actually documents. Two versions with different titles are a
+    strong hint that two different workflows were recorded into one document —
+    the mistake the UI cannot currently prevent.
+    """
     with connect(cfg) as conn:
         rows = conn.execute(
-            "SELECT version_id, version, job_id, source, created_at "
+            "SELECT version_id, version, job_id, source, created_at, sop_json "
             "FROM versions WHERE document_id = ? ORDER BY version DESC",
             (document_id,),
         ).fetchall()
-    return [dict(r) for r in rows]
+
+    out = []
+    for r in rows:
+        item = {k: r[k] for k in r.keys() if k != "sop_json"}
+        try:
+            item["title"] = json.loads(r["sop_json"]).get("title") or ""
+        except (json.JSONDecodeError, TypeError):
+            item["title"] = ""
+        out.append(item)
+    return out
 
 
 def latest_sop_for_job(cfg: Config, job_id: str, *,

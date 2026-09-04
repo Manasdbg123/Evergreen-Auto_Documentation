@@ -35,9 +35,16 @@ export const api = {
       `/api/documents/${documentId}${version ? `?version=${version}` : ""}`,
     ),
 
-  createDocument: (body: { job_id?: string; title?: string }) =>
+  createDocument: (body: { job_id?: string; title?: string; app?: string }) =>
     request<{ document_id: string; version: number }>("/api/documents", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+
+  renameDocument: (documentId: string, body: { title?: string; app?: string }) =>
+    request<DocumentSummary>(`/api/documents/${documentId}`, {
+      method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),

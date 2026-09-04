@@ -90,6 +90,8 @@ export interface DiffResult {
 export interface DocumentSummary {
   document_id: string;
   title: string;
+  /** The product this procedure belongs to. "" means ungrouped. */
+  app: string;
   created_at: number;
   updated_at: number;
   version_count: number;
@@ -102,6 +104,8 @@ export interface VersionInfo {
   job_id: string | null;
   source: string;
   created_at: number;
+  /** The title the SOP carried at this version — i.e. which workflow it documents. */
+  title: string;
 }
 
 export interface JobRecord {

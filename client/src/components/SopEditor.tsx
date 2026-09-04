@@ -80,17 +80,13 @@ export function SopEditor({ documentId, sop, diffEntries, onSaved }: Props) {
   return (
     <div className="editor">
       <div className="toolbar">
+        {/* Undo and redo are still available on Ctrl+Z / Ctrl+Shift+Z — the
+            UndoRedo extension is still loaded. Buttons for what every editor
+            already does on the keyboard were only taking attention away from
+            the one control that matters here. */}
         <button onClick={save} disabled={!dirty}>
           {dirty ? "Save new version" : "Saved"}
         </button>
-        <button onClick={() => editor?.commands.undo()}>Undo</button>
-        <button onClick={() => editor?.commands.redo()}>Redo</button>
-        <a href={api.exportUrl(documentId, "markdown")} target="_blank" rel="noreferrer">
-          Markdown
-        </a>
-        <a href={api.exportUrl(documentId, "html")} target="_blank" rel="noreferrer">
-          HTML
-        </a>
         <span className="hint">{status}</span>
       </div>
 

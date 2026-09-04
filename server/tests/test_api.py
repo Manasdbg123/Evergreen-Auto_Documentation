@@ -26,6 +26,9 @@ from app import db  # noqa: E402
 from app.config import load_config  # noqa: E402
 from app.pipeline.base import JobPaths, read_stage  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sop_fixtures  # noqa: E402
+
 DEMO_V1, DEMO_V2 = "demo_v1", "demo_v2"
 
 
@@ -248,6 +251,62 @@ def test_the_same_diff_can_be_run_twice(client, cfg, document):
     )
 
 
+def test_the_diff_adds_exactly_one_version(client, cfg, document):
+    """Running a diff appends the merged result and nothing else."""
+    before = len(client.get(f"/api/documents/{document}/versions").json())
+
+    db.create_job(cfg, DEMO_V2)
+    resp = client.post(f"/api/documents/{document}/diff",
+                       json={"job_id": DEMO_V2, "offline": True})
+    assert resp.status_code == 200, resp.text
+
+    versions = client.get(f"/api/documents/{document}/versions").json()
+    assert len(versions) == before + 1, (
+        f"the diff added {len(versions) - before} versions: "
+        f"{[(v['version'], v['source']) for v in versions]}"
+    )
+    assert versions[0]["source"] == "merged", (
+        "the newest version must be the merged one — the version carrying "
+        "preserved edits, not the raw regeneration"
+    )
+
+
+def test_the_upload_path_does_not_version_behind_the_diff(monkeypatch, cfg):
+    """The API's background task must tell the runner not to version.
+
+    Regression. `run_pipeline` stored the finished SOP whenever it was given a
+    document_id, and the API gives it one on every re-recording — so a single
+    upload appended two versions: the raw model output, then the merged result.
+    The raw one is the copy with the user's hand edits still missing, so the
+    history read as though their notes had vanished for a version.
+
+    This asserts the wiring rather than the outcome. Reaching the line through
+    HTTP would mean a real video and a full pipeline run — and the first
+    version of this test did exactly that, which called the model for real and
+    would have overwritten a hand-restored fixture SOP. A test that costs money
+    and damages fixtures is not worth the extra coverage.
+    """
+    from app.routes import jobs as jobs_route
+
+    passed: dict[str, object] = {}
+
+    def fake_run_pipeline(_cfg, job_id, **kwargs):
+        passed.update(kwargs)
+        return None
+
+    monkeypatch.setattr(jobs_route, "run_pipeline", fake_run_pipeline)
+    jobs_route._run(cfg, "job_probe", False, "doc_probe")
+
+    assert passed.get("store_version") is False, (
+        "the upload path must pass store_version=False; the diff endpoint "
+        "versions the result, and both doing it appends two per upload"
+    )
+    assert passed.get("document_id") == "doc_probe", (
+        "the document must still be passed through, or the job is never "
+        "attached and the next diff has nothing to compare against"
+    )
+
+
 def test_rejecting_a_change_restores_the_previous_text(client, cfg, document):
     db.create_job(cfg, DEMO_V2)
     resp = client.post(f"/api/documents/{document}/diff",
@@ -285,6 +344,50 @@ def test_exports_render_from_the_edited_version(client, document):
     assert md.status_code == 200 and html.status_code == 200
     assert note in md.text, "the export shipped generated text over an edit"
     assert note in html.text
+
+
+def test_a_document_can_be_renamed_and_moved(client, cfg, document):
+    resp = client.patch(f"/api/documents/{document}",
+                        json={"title": "Approve a refund", "app": "Salesforce"})
+    assert resp.status_code == 200, resp.text
+
+    listed = next(d for d in client.get("/api/documents").json()
+                  if d["document_id"] == document)
+    assert listed["title"] == "Approve a refund"
+    assert listed["app"] == "Salesforce"
+
+
+def test_a_chosen_name_survives_regeneration(client, cfg, document):
+    """The sidebar name must not follow whatever the model called the newest
+    recording.
+
+    Regression. `save_version` overwrote the document title on every save, so
+    a name the user had chosen was replaced the next time a recording came in
+    — and with several workflows in one document the sidebar entry silently
+    renamed itself as they were added.
+    """
+    client.patch(f"/api/documents/{document}", json={"title": "Refunds — daily"})
+
+    db.create_job(cfg, DEMO_V2)
+    resp = client.post(f"/api/documents/{document}/diff",
+                       json={"job_id": DEMO_V2, "offline": True})
+    assert resp.status_code == 200, resp.text
+
+    listed = next(d for d in client.get("/api/documents").json()
+                  if d["document_id"] == document)
+    assert listed["title"] == "Refunds — daily", (
+        f"regeneration renamed the document to {listed['title']!r}"
+    )
+
+
+def test_an_unnamed_document_still_takes_its_name_from_the_sop(client, cfg):
+    """...but a document nobody has named should adopt the generated title,
+    which is what `cli run --save` relies on."""
+    doc = db.create_document(cfg)
+    assert db.get_document(cfg, doc)["title"] == db.PLACEHOLDER_TITLE
+
+    db.save_version(cfg, doc, sop_fixtures.sop_v1(), job_id=DEMO_V1)
+    assert db.get_document(cfg, doc)["title"] == sop_fixtures.sop_v1().title
 
 
 def test_unknown_ids_are_404_not_500(client):

@@ -92,7 +92,11 @@ def _run(cfg, job_id: str, offline: bool, document_id: str | None) -> None:
     """Background task. Failures are recorded on the job, never raised into
     a request that has already returned."""
     try:
-        run_pipeline(cfg, job_id, offline=offline, document_id=document_id)
+        # The API versions the result itself — a first recording through
+        # POST /api/documents, a re-recording through the diff that merges it.
+        # Letting the runner version it too produced two entries per upload.
+        run_pipeline(cfg, job_id, offline=offline, document_id=document_id,
+                     store_version=False)
     except Exception as exc:  # pragma: no cover - background path
         print(f"[api] job {job_id} failed: {type(exc).__name__}: {exc}")
         # run_pipeline records its own failures, but it can only do that once

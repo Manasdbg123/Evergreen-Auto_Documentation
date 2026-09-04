@@ -31,6 +31,7 @@ const STAGES = [
 export function Upload({ documentId, label, onComplete }: Props) {
   const [jobId, setJobId] = useState<string | null>(null);
   const [job, setJob] = useState<JobRecord | null>(null);
+  const [finished, setDone] = useState<{ jobId: string; spend: number } | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const done = useRef(false);
@@ -45,6 +46,14 @@ export function Upload({ documentId, label, onComplete }: Props) {
           done.current = true;
           clearInterval(timer);
           onComplete(jobId);
+          // Collapse the panel once the document is open. The eight stage
+          // chips are worth watching while the pipeline runs and are clutter
+          // afterwards — but the spend is worth keeping on screen, so it
+          // becomes a single quiet line. A failure keeps its full panel,
+          // because that one still needs reading.
+          setDone({ jobId, spend: record.spend_usd ?? 0 });
+          setJobId(null);
+          setJob(null);
         } else if (record.status === "failed") {
           done.current = true;
           clearInterval(timer);
@@ -60,6 +69,7 @@ export function Upload({ documentId, label, onComplete }: Props) {
   async function upload(file: File) {
     setBusy(true);
     setError("");
+    setDone(null);
     done.current = false;
     try {
       const result = await api.upload(file, { documentId });
@@ -112,6 +122,13 @@ export function Upload({ documentId, label, onComplete }: Props) {
             <span className="hint">spent ${job.spend_usd.toFixed(4)}</span>
           )}
         </div>
+      )}
+
+      {finished && (
+        <p className="finished">
+          Done · <code>{finished.jobId}</code>
+          {finished.spend > 0 && <> · ${finished.spend.toFixed(4)}</>}
+        </p>
       )}
 
       {error && <p className="error">{error}</p>}

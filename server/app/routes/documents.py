@@ -24,13 +24,21 @@ router = APIRouter(prefix="/api/documents", tags=["documents"])
 
 
 class CreateDocument(BaseModel):
-    title: str = "Untitled procedure"
+    title: str = db.PLACEHOLDER_TITLE
     #: Adopt this job's generated SOP as v1.
     job_id: str | None = None
+    #: The product this procedure belongs to — "LeetCode", "Salesforce".
+    app: str = ""
 
 
 class SaveDocument(BaseModel):
     sop: SOP
+
+
+class RenameDocument(BaseModel):
+    """Both optional: send one to rename, the other to move, or both."""
+    title: str | None = None
+    app: str | None = None
 
 
 @router.get("")
@@ -49,12 +57,22 @@ def create_document(body: CreateDocument) -> dict[str, Any]:
         if sop is None:
             raise HTTPException(404, f"Job '{body.job_id}' has no SOP yet")
 
-    document_id = db.create_document(cfg, sop.title if sop else body.title)
+    document_id = db.create_document(cfg, sop.title if sop else body.title,
+                                     app=body.app)
     version = 0
     if sop:
         db.attach_job_to_document(cfg, body.job_id, document_id)
         version = db.save_version(cfg, document_id, sop, job_id=body.job_id)
     return {"document_id": document_id, "version": version}
+
+
+@router.patch("/{document_id}")
+def rename_document(document_id: str, body: RenameDocument) -> dict[str, Any]:
+    """Rename a document, or move it under a different app."""
+    cfg = load_config()
+    if not db.update_document(cfg, document_id, title=body.title, app=body.app):
+        raise HTTPException(404, f"No document '{document_id}'")
+    return db.get_document(cfg, document_id) or {}
 
 
 @router.get("/{document_id}")

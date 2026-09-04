@@ -54,6 +54,7 @@ def run_pipeline(
     offline: bool = False,
     force: bool = False,
     document_id: str | None = None,
+    store_version: bool = True,
     on_stage: Callable[[str], None] | None = None,
 ) -> SOP | None:
     """Run every stage for one job, tracking status. Returns the SOP.
@@ -61,6 +62,13 @@ def run_pipeline(
     When `document_id` is given the finished SOP is stored as the next version
     of that document. That is what makes the *next* recording diffable: a job
     whose SOP was never versioned has nothing to be the previous version of.
+
+    `store_version=False` suppresses that, for callers that version the result
+    themselves. The API does: a re-recording is versioned by the diff that
+    merges it, and saving here as well produced two versions per upload — the
+    first being the raw model output, i.e. the one with the user's hand edits
+    still missing. Showing that in the history reads as though their notes had
+    briefly disappeared.
     """
     db.create_job(cfg, job_id, document_id=document_id)
     if document_id:
@@ -82,7 +90,7 @@ def run_pipeline(
         raise
 
     sop = current_sop(cfg, job_id)
-    if sop is not None and document_id:
+    if sop is not None and document_id and store_version:
         version = db.save_version(cfg, document_id, sop, job_id=job_id)
         print(f"[runner] stored {document_id} v{version}")
 
